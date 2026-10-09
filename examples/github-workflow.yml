@@ -1,0 +1,46 @@
+# Install this in the TARGET repository only after configuring and committing its policy/checkpoint.
+# Replace the example action repository and pin it to a reviewed commit before enabling.
+name: Selected upstream functionality
+on:
+  schedule:
+    - cron: '17 8 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        options: [check, sync, adopt]
+        default: check
+        description: Preview changes, sync new changes, or adopt existing selected functionality
+permissions:
+  contents: read
+concurrency:
+  group: oc-port-agent
+  cancel-in-progress: false
+jobs:
+  upstream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Check out target base
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.OC_PORT_GITHUB_TOKEN }}
+      - name: Check or synchronize selected functionality
+        uses: YOUR_OWNER/oc-port-agent@REVIEWED_COMMIT_SHA
+        with:
+          api-key: ${{ secrets.OPENCODE_API_KEY }}
+          api-key-env: OPENCODE_API_KEY
+          model: opencode/gpt-6.1-sol
+          opencode-version: '2.0.26'
+          mode: ${{ inputs.mode || 'sync' }}
+          publish: ${{ inputs.mode == 'check' && 'false' || 'true' }}
+          repository: ${{ github.repository }}
+          base: main
+        env:
+          GH_TOKEN: ${{ secrets.OC_PORT_GITHUB_TOKEN }}

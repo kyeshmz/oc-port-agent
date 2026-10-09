@@ -1,0 +1,34 @@
+# External-provider alternative. Store secrets in GitHub, never workflow-dispatch inputs.
+name: External-provider upstream functionality
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: oc-port-agent
+  cancel-in-progress: false
+jobs:
+  upstream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.OC_PORT_GITHUB_TOKEN }}
+      - uses: YOUR_OWNER/oc-port-agent@REVIEWED_COMMIT_SHA
+        with:
+          api-key: ${{ secrets.OPENAI_API_KEY }}
+          api-key-env: OPENAI_API_KEY
+          model: openai/gpt-6.1-sol
+          opencode-version: '2.0.26'
+          mode: sync
+          publish: 'true'
+          repository: ${{ github.repository }}
+          base: main
+        env:
+          GH_TOKEN: ${{ secrets.OC_PORT_GITHUB_TOKEN }}

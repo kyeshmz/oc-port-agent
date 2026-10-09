@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "oc-port-agent tracking policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "upstream", "selections", "verification"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "const": 1 },
+    "upstream": {
+      "type": "object", "additionalProperties": false, "required": ["repository", "ref"],
+      "properties": { "repository": { "type": "string", "minLength": 1 }, "ref": { "type": "string", "minLength": 1 } }
+    },
+    "selections": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["id", "description", "upstreamPaths", "targetPaths", "acceptance"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "description": { "type": "string", "minLength": 1 },
+          "upstreamPaths": { "$ref": "#/$defs/paths" },
+          "excludeUpstreamPaths": { "$ref": "#/$defs/strings" },
+          "targetPaths": { "$ref": "#/$defs/paths" },
+          "acceptance": { "$ref": "#/$defs/paths" },
+          "mappings": {
+            "type": "array", "items": {
+              "type": "object", "additionalProperties": false, "required": ["upstream", "target"],
+              "properties": { "upstream": { "type": "string", "minLength": 1 }, "target": { "$ref": "#/$defs/paths" } }
+            }
+          }
+        }
+      }
+    },
+    "preserve": { "$ref": "#/$defs/strings" },
+    "protectedPaths": { "$ref": "#/$defs/strings" },
+    "verification": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false, "required": ["command", "args"],
+        "properties": {
+          "command": { "type": "string", "minLength": 1 },
+          "args": { "type": "array", "items": { "type": "string" } },
+          "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 3600 }
+        }
+      }
+    },
+    "opencode": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "executable": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "timeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 7200 },
+        "maxAttempts": { "type": "integer", "minimum": 1, "maximum": 5 },
+        "steps": { "type": "integer", "minimum": 1, "maximum": 500 }
+      }
+    },
+    "limits": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "maxCommits": { "type": "integer", "minimum": 1, "maximum": 10000 },
+        "maxContextBytes": { "type": "integer", "minimum": 1000, "maximum": 50000000 }
+      }
+    }
+  },
+  "$defs": {
+    "strings": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "paths": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+  }
+}

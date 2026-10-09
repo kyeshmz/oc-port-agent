@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "upstream": { "repository": "https://github.com/EXAMPLE/rust-library.git", "ref": "main" },
+  "selections": [{
+    "id": "parser-parity",
+    "description": "Keep the TypeScript parser behavior aligned with the selected Rust parser, using TypeScript idioms rather than a literal syntax translation.",
+    "upstreamPaths": ["crates/parser/src/**", "crates/parser/tests/**"],
+    "targetPaths": ["src/parser/**", "test/parser/**"],
+    "acceptance": [
+      "Shared fixtures produce equivalent parsed values and error classifications.",
+      "Preserve integer, Unicode, byte-offset, cancellation, and boundary-case behavior; block when the languages cannot match without an approved API change.",
+      "Port all relevant new or changed upstream parser tests."
+    ],
+    "mappings": [{ "upstream": "crates/parser/src/**", "target": ["src/parser/**"] }]
+  }],
+  "preserve": ["Keep the TypeScript package exports and async API."],
+  "verification": [
+    { "command": "npm", "args": ["run", "typecheck"] },
+    { "command": "npm", "args": ["test"] },
+    { "command": "npm", "args": ["run", "test:parity"], "timeoutSeconds": 600 }
+  ]
+}

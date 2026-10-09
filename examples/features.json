@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "upstream": { "repository": "https://github.com/EXAMPLE/reference-project.git", "ref": "main" },
+  "selections": [
+    {
+      "id": "client-retries",
+      "description": "Adopt the upstream HTTP client's retry policy and keep its observable behavior aligned. The target may use a different language or HTTP library.",
+      "upstreamPaths": ["src/client/**", "tests/client/**"],
+      "excludeUpstreamPaths": ["tests/client/benchmarks/**"],
+      "targetPaths": ["src/network/**", "test/network/**"],
+      "acceptance": [
+        "Transient failures follow the upstream retry count, delays, cancellation, and final-error semantics.",
+        "Permanent errors are not retried.",
+        "New and changed upstream behavior tests have corresponding target regression coverage."
+      ],
+      "mappings": [{ "upstream": "src/client/**", "target": ["src/network/**"] }]
+    },
+    {
+      "id": "api-documentation",
+      "description": "Reflect relevant API documentation changes using the target's public names and examples; do not copy upstream branding or language-specific setup.",
+      "upstreamPaths": ["docs/api/**"],
+      "targetPaths": ["docs/reference/**"],
+      "acceptance": ["Examples agree with the implemented target API and all changed docs links remain valid."]
+    }
+  ],
+  "preserve": [
+    "Keep target-specific authentication and deployment behavior.",
+    "Do not adopt upstream UI features, branding, or telemetry unless a selection explicitly requests them.",
+    "Do not break the target's public API silently; report blocked when adaptation requires a design decision."
+  ],
+  "verification": [
+    { "command": "npm", "args": ["run", "typecheck"], "timeoutSeconds": 300 },
+    { "command": "npm", "args": ["test"], "timeoutSeconds": 600 }
+  ],
+  "opencode": { "timeoutSeconds": 1200, "maxAttempts": 2, "steps": 100 },
+  "limits": { "maxCommits": 100, "maxContextBytes": 1000000 }
+}

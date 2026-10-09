@@ -1,0 +1,20 @@
+{
+  "name": "oc-port-agent",
+  "version": "0.1.0",
+  "description": "Use OpenCode to selectively adopt and synchronize upstream functionality through reviewed changes.",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "bin": { "oc-port-agent": "dist/src/cli.js" },
+  "files": ["dist/src", "README.md", "LICENSE", "examples", "schema"],
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.9.0"
+  }
+}

@@ -1,0 +1,76 @@
+name: oc-port-agent
+description: Selectively adopt or synchronize upstream functionality using OpenCode V2 and a provider API key.
+inputs:
+  api-key:
+    description: Model provider API key supplied from GitHub Secrets. Required for sync/adopt unless the provider environment variable is already set; not needed for check.
+    required: false
+    default: ''
+  api-key-env:
+    description: OpenCode provider credential variable, for example ANTHROPIC_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY, or OPENCODE_API_KEY.
+    default: OPENCODE_API_KEY
+  model:
+    description: OpenCode provider/model#variant. Overrides the tracking policy model for this run without modifying repository files.
+    required: false
+    default: ''
+  install-opencode:
+    description: Install the pinned OpenCode V2 CLI on the runner. Set false to use a preinstalled V2 CLI.
+    default: 'true'
+  opencode-version:
+    description: Exact @opencode/cli V2 release to install; no floating latest version or curl installer.
+    default: '2.0.26'
+  mode:
+    description: check, sync, or adopt (full import of selected existing functionality)
+    default: sync
+  publish:
+    description: Set to true to push and create a draft PR. Otherwise only create a local proposal.
+    default: 'false'
+  repository:
+    description: Explicit owner/repository of the target. Required when publishing.
+    default: ''
+  base:
+    description: Explicit target base branch. Required when publishing.
+    default: ''
+runs:
+  using: composite
+  steps:
+    - name: Install OpenCode V2
+      if: inputs.mode != 'check'
+      shell: bash
+      env:
+        OC_PORT_INSTALL: ${{ inputs.install-opencode }}
+        OC_PORT_VERSION: ${{ inputs.opencode-version }}
+      run: |
+        set -euo pipefail
+        case "$OC_PORT_INSTALL" in
+          true)
+            if [[ ! "$OC_PORT_VERSION" =~ ^2\.[0-9]+\.[0-9]+$ ]]; then
+              echo 'opencode-version must be an exact V2 release such as 2.0.26' >&2; exit 1
+            fi
+            npm install --global "@opencode/cli@$OC_PORT_VERSION"
+            ;;
+          false) ;;
+          *) echo 'install-opencode must be true or false' >&2; exit 1 ;;
+        esac
+        if [[ ! "$(opencode --version)" =~ (^|[[:space:]])v?2\. ]]; then
+          echo 'This action requires OpenCode V2' >&2; exit 1
+        fi
+    - name: Build oc-port-agent
+      shell: bash
+      working-directory: ${{ github.action_path }}
+      run: |
+        npm ci
+        npm run build
+    - name: Check or adapt upstream functionality
+      shell: bash
+      env:
+        OC_PORT_TOOL: ${{ github.action_path }}
+        OC_PORT_MODE: ${{ inputs.mode }}
+        OC_PORT_PUBLISH: ${{ inputs.publish }}
+        OC_PORT_REPOSITORY: ${{ inputs.repository }}
+        OC_PORT_BASE: ${{ inputs.base }}
+        OC_PORT_API_KEY: ${{ inputs.api-key }}
+        OC_PORT_API_KEY_ENV: ${{ inputs.api-key-env }}
+        OC_PORT_MODEL: ${{ inputs.model }}
+      run: |
+        set -euo pipefail
+        node "$OC_PORT_TOOL/dist/src/action.js"
