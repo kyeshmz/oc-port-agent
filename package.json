@@ -11,10 +11,12 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "npm run build && node --test dist/test/*.test.js"
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "test:public": "npm run build && node dist/examples/public-repositories.js"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "ajv": "8.20.0",
     "typescript": "^5.9.0"
   }
 }

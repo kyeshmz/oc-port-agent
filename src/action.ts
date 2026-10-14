@@ -13,6 +13,7 @@ export function actionInvocation(environment: NodeJS.ProcessEnv): ActionInvocati
   if (!['true', 'false'].includes(publication)) throw new Error('publish must be true or false');
   if (mode === 'check' && publication === 'true') throw new Error('check cannot publish');
   const args = mode === 'adopt' ? ['sync', '--full'] : [mode];
+  if (environment.OC_PORT_CONFIG) args.push('--config', environment.OC_PORT_CONFIG);
   const env = { ...environment };
   // Only the selected provider receives this credential, through the environment.
   delete env.OC_PORT_API_KEY;

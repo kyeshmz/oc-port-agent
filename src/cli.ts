@@ -12,6 +12,7 @@ Run inside the target Git repository:
   oc-port-agent baseline --commit <upstream-SHA|HEAD>
   oc-port-agent check [--full]
   oc-port-agent sync [--full] [--model provider/model#variant] [--pr --repo owner/target --base main]
+  check, baseline and sync accept --config <repository-relative-policy.json> for independently tracked upstreams.
 
 init writes a configurable tracking policy, not an implementation.
 baseline explicitly acknowledges the starting point; commit the policy and state.
@@ -27,11 +28,12 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()): P
     upstream: { type: 'string' }, ref: { type: 'string' }, commit: { type: 'string' },
     full: { type: 'boolean' }, pr: { type: 'boolean' }, repo: { type: 'string' }, base: { type: 'string' },
     model: { type: 'string' },
+    config: { type: 'string' },
   } });
   if (values.help || !positionals.length) { console.log(HELP); return; }
   if (positionals.length !== 1 || !['init', 'baseline', 'check', 'sync'].includes(positionals[0]!)) throw new Error(HELP);
   const command = positionals[0]!;
-  const permitted: Record<string, string[]> = { init: ['upstream', 'ref'], baseline: ['commit'], check: ['full'], sync: ['full', 'model', 'pr', 'repo', 'base'] };
+  const permitted: Record<string, string[]> = { init: ['upstream', 'ref'], baseline: ['commit', 'config'], check: ['full', 'config'], sync: ['full', 'model', 'pr', 'repo', 'base', 'config'] };
   for (const key of Object.keys(values)) if (!permitted[command]!.includes(key)) throw new Error(`--${key} is not valid for ${command}`);
   const root = await repositoryRoot(cwd);
   if (command === 'init') {
@@ -40,10 +42,10 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()): P
     console.log('Created oc-port-agent.json. Edit selections, acceptance criteria, preservation rules, and verification before setting a baseline.');
   } else if (command === 'baseline') {
     if (!values.commit) throw new Error('baseline requires --commit; there is no implicit starting point');
-    const state = await setBaseline(root, values.commit);
+    const state = await setBaseline(root, values.commit, values.config);
     console.log(`Baseline explicitly set to ${state.lastSyncedCommit}. This is an acknowledgment, not a parity check. Commit the policy and checkpoint; use sync --full for initial adoption.`);
   } else if (command === 'check') {
-    const { plan } = await planSync(root, values.full);
+    const { plan } = await planSync(root, values.full, values.config);
     console.log(JSON.stringify({ mode: plan.mode, from: plan.from, to: plan.to, commits: plan.commits, changedPaths: plan.changedPaths, selections: plan.selections.map(s => ({ id: s.id, description: s.description })), contextBytes: Buffer.byteLength(JSON.stringify(plan)) }, null, 2));
   } else {
     if (values.pr && (!values.repo || !values.base)) throw new Error('--pr requires explicit --repo and --base');
@@ -51,6 +53,7 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()): P
     const result = await synchronize(root, {
       ...(values.full !== undefined ? { full: values.full } : {}),
       ...(values.model !== undefined ? { model: values.model } : {}),
+      ...(values.config !== undefined ? { config: values.config } : {}),
       ...(values.pr ? { publish: { repository: values.repo!, base: values.base! } } : {}),
     });
     console.log(JSON.stringify(result, null, 2));

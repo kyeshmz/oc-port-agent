@@ -35,6 +35,41 @@ test('editor JSON schema references are accepted but do not change tracking sema
   assert.equal(policyHash(original), policyHash(withSchema));
   assert.throws(() => parseConfig({ ...configInput(), $schema: {} }), /schema/);
 });
+test('legacy policy hash stays fixed and changed structured intent requires explicit checkpoint review', () => {
+  const legacyInput = configInput('/upstream');
+  legacyInput.verification = [{ command: 'node', args: ['--test', 'test/client.test.mjs'] }];
+  const legacy = parseConfig(legacyInput);
+  assert.equal(Object.hasOwn(legacy.selections[0]!, 'instructions'), false);
+  assert.equal(policyHash(legacy), '5d3944d7c69f110356a85760d2d4c873219e1e9d7cbd69d8324a54146b0a9981');
+
+  const state = {
+    version: 1,
+    upstream: legacy.upstream,
+    policyHash: policyHash(legacy),
+    lastSyncedCommit: 'a'.repeat(40),
+  };
+  const changedInput = configInput('/upstream');
+  changedInput.verification = [{ command: 'node', args: ['--test', 'test/client.test.mjs'] }];
+  (changedInput.selections as Record<string, unknown>[])[0]!.instructions = {
+    goal: 'Port cancellation-aware retry behavior.',
+  };
+  const changed = parseConfig(changedInput);
+  assert.deepEqual(changed.selections[0]!.instructions, { goal: 'Port cancellation-aware retry behavior.', adaptation: [], nonGoals: [] });
+  assert.notEqual(policyHash(changed), policyHash(legacy));
+  assert.throws(() => parseState(state, changed), /Tracking policy changed.*baseline --commit/);
+  assert.equal(policyHash(parseConfig({ ...changedInput, $schema: './editor.schema.json' })), policyHash(changed));
+
+  for (const instructions of [
+    { goal: 'A different goal.' },
+    { goal: 'Port cancellation-aware retry behavior.', adaptation: ['Use the target AbortSignal API.'] },
+    { goal: 'Port cancellation-aware retry behavior.', nonGoals: ['Do not change authentication.'] },
+  ]) {
+    const candidateInput = configInput('/upstream');
+    candidateInput.verification = [{ command: 'node', args: ['--test', 'test/client.test.mjs'] }];
+    (candidateInput.selections as Record<string, unknown>[])[0]!.instructions = instructions;
+    assert.notEqual(policyHash(parseConfig(candidateInput)), policyHash(legacy));
+  }
+});
 test('policy changes require an explicit baseline, but model changes do not', () => {
   const original = config();
   const state = { version: 1, upstream: { ref: 'main', repository: '/upstream' }, policyHash: policyHash(original), lastSyncedCommit: 'a'.repeat(40) };

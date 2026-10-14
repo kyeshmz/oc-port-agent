@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile, lstat } from 'node:fs/promises';
-import { join } from 'node:path';
-import { CONFIG, STATE, type Config, type Selection, type State, loadConfig, parseState, policyHash, safePath, selected } from './config.js';
+import { dirname, join } from 'node:path';
+import { CONFIG, checkpointPath, type Config, type Selection, type State, loadConfig, parseState, policyHash, safePath, selected } from './config.js';
 import { git, run } from './process.js';
 
 export interface SourceFile { path: string; content: string }
@@ -51,16 +51,17 @@ export async function fetchUpstream(root: string, config: Config): Promise<{ cac
   return { cache, head };
 }
 
-export async function setBaseline(root: string, commit: string): Promise<State> {
-  const config = await loadConfig(root);
+export async function setBaseline(root: string, commit: string, file = CONFIG): Promise<State> {
+  const config = await loadConfig(root, file);
   const { cache, head } = await fetchUpstream(root, config);
   if (commit !== 'HEAD' && !/^[a-f0-9]{7,64}$/.test(commit)) throw new Error('Baseline must be HEAD or a hexadecimal upstream commit SHA');
   const sha = (await git(cache, ['rev-parse', '--verify', `${commit === 'HEAD' ? head : commit}^{commit}`])).trim();
   const ancestor = await run('git', ['merge-base', '--is-ancestor', sha, head], cache);
   if (ancestor.code !== 0) throw new Error('Baseline is not an ancestor of the configured upstream branch');
   const state: State = { version: 1, upstream: config.upstream, policyHash: policyHash(config), lastSyncedCommit: sha };
-  await mkdir(join(root, '.oc-port'), { recursive: true });
-  await jsonWrite(join(root, STATE), state);
+  const destination = join(root, checkpointPath(config));
+  await mkdir(dirname(destination), { recursive: true });
+  await jsonWrite(destination, state);
   return state;
 }
 
@@ -81,13 +82,14 @@ async function sourceFiles(cache: string, sha: string, selections: Selection[]):
   return result;
 }
 
-export async function planSync(root: string, full = false): Promise<{ config: Config; state: State; plan: Plan }> {
-  const config = await loadConfig(root);
+export async function planSync(root: string, full = false, file = CONFIG): Promise<{ config: Config; state: State; plan: Plan }> {
+  const config = await loadConfig(root, file);
   let state: State;
-  try { state = parseState(JSON.parse(await readFile(join(root, STATE), 'utf8')), config); }
+  try { state = parseState(JSON.parse(await readFile(join(root, checkpointPath(config)), 'utf8')), config); }
   catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw new Error('No checkpoint. Run baseline --commit <upstream-SHA> explicitly; use HEAD then sync --full for an initial adoption.');
-    throw error;
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    if (!config.baselineCommit) throw new Error('No checkpoint. Run baseline --commit <upstream-SHA> explicitly; use HEAD then sync --full for an initial adoption.');
+    state = { version: 1, upstream: config.upstream, policyHash: policyHash(config), lastSyncedCommit: config.baselineCommit };
   }
   const { cache, head } = await fetchUpstream(root, config);
   const ancestor = await run('git', ['merge-base', '--is-ancestor', state.lastSyncedCommit, head], cache);

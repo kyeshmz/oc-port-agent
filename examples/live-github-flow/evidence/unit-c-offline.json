@@ -1,0 +1,36 @@
+{
+  "evidenceVersion": 1,
+  "phase": "unit-c-implementation-only",
+  "date": "2026-10-10",
+  "remoteActionsOccurred": false,
+  "liveGitHubApiCalls": 0,
+  "liveCloudflareApiCalls": 0,
+  "savedOpenCodeCredentialResolved": false,
+  "realAppCredentialFileRead": false,
+  "workerDeployed": false,
+  "dockerInvoked": false,
+  "providerCallMade": false,
+  "runtimePreflightExecuted": false,
+  "resourceNames": {
+    "worker": "oc-port-agent-live-test-20261010",
+    "accountId": "324e23339afefd2f1f689e735c2b8789",
+    "repository": "kyeshmz/oc-port-agent-live-test-20261010",
+    "appId": 5266090,
+    "installationId": 170044765
+  },
+  "implementation": {
+    "controller": "examples/live-github-flow/deploy-worker.mjs",
+    "credentialResolver": "examples/live-github-flow/opencode-credential.mjs",
+    "liveWorkerEntry": "apps/cloudflare/src/live-entry.ts",
+    "reviewRequiredBeforeExecution": true
+  },
+  "verification": {
+    "nodeOfflineTests": { "passed": 34, "failed": 0 },
+    "credentialResolverSyntax": "passed",
+    "deploymentControllerSyntax": "passed",
+    "liveEntryVitestNode": { "passed": 7, "failed": 0 },
+    "cloudflareTypecheck": "passed",
+    "gitDiffCheck": "passed"
+  },
+  "fixtures": "Synthetic App/API/resource/provider-key fixtures only. Tests did not inspect the user's private credential file or access the OpenCode credential store."
+}

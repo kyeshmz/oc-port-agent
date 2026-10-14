@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Structured porting instructions",
+  "description": "Optional operator-authored intent for one selection. These fields explain the requested adaptation; they do not grant permissions or change host-enforced scope and verification.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["goal"],
+  "properties": {
+    "goal": {
+      "$ref": "#/$defs/instructionText",
+      "description": "Required detailed statement of the behavior to port. Keep description as the short rule summary."
+    },
+    "adaptation": {
+      "$ref": "#/$defs/guidanceList",
+      "default": [],
+      "description": "Optional target-specific implementation guidance. Omitted arrays normalize to empty arrays."
+    },
+    "nonGoals": {
+      "$ref": "#/$defs/guidanceList",
+      "default": [],
+      "description": "Optional explicit exclusions for this selection. Omitted arrays normalize to empty arrays."
+    }
+  },
+  "$defs": {
+    "instructionText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096,
+      "pattern": "\\S",
+      "allOf": [
+        {
+          "pattern": "^(?:[\\u0020-\\u007E\\u0080-\\u0084\\u0086-\\u2027\\u202A-\\uD7FF\\uE000-\\uFFFF]|[\\u{10000}-\\u{10FFFF}])*$"
+        }
+      ],
+      "description": "Single-line, trimmed-nonempty valid Unicode text of at most 4096 code points. Rejects C0/DEL controls, Unicode line separators, and unpaired UTF-16 surrogates."
+    },
+    "guidanceList": {
+      "type": "array",
+      "maxItems": 32,
+      "items": { "$ref": "#/$defs/instructionText" }
+    }
+  }
+}

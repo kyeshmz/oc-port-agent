@@ -1,12 +1,15 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "oc-port-agent tracking policy",
+  "title": "oc-port-agent CLI tracking policy",
+  "description": "The version 1 policy accepted by the local CLI. JSON Schema checks structure; the CLI also validates repository, path, checkpoint, and cross-field semantics.",
   "type": "object",
   "additionalProperties": false,
   "required": ["version", "upstream", "selections", "verification"],
   "properties": {
-    "$schema": { "type": "string" },
+    "$schema": { "type": "string", "minLength": 1, "description": "Optional editor schema reference. The CLI validates this as metadata and does not fetch it." },
     "version": { "const": 1 },
+    "baselineCommit": { "type": "string", "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$", "description": "Explicitly reviewed bootstrap baseline used only when this policy has no checkpoint. Never resolves HEAD and never replaces a saved checkpoint." },
+    "allowSkillEdits": { "type": "array", "uniqueItems": true, "items": { "type": "string", "maxLength": 64, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" }, "description": "Opt in to exact skill IDs under .opencode/skills. Explicit target paths are also required; agents, config, nested skill registrations and checkpoints remain protected." },
     "upstream": {
       "type": "object", "additionalProperties": false, "required": ["repository", "ref"],
       "properties": { "repository": { "type": "string", "minLength": 1 }, "ref": { "type": "string", "minLength": 1 } }
@@ -28,6 +31,10 @@
               "type": "object", "additionalProperties": false, "required": ["upstream", "target"],
               "properties": { "upstream": { "type": "string", "minLength": 1 }, "target": { "$ref": "#/$defs/paths" } }
             }
+          },
+          "instructions": {
+            "$ref": "./porting-instructions.schema.json",
+            "description": "Optional detailed task intent; it cannot widen declared targetPaths or change host-enforced safeguards."
           }
         }
       }

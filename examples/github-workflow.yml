@@ -1,9 +1,14 @@
 # Install this in the TARGET repository only after configuring and committing its policy/checkpoint.
 # Replace the example action repository and pin it to a reviewed commit before enabling.
+# An upstream-push dispatch is only a wake-up signal. The sync reads the upstream repository and ref
+# from the committed policy. This workflow never reads github.event.client_payload, because anyone
+# holding the dispatch token controls it.
 name: Selected upstream functionality
 on:
+  repository_dispatch:
+    types: [upstream-push]
   schedule:
-    - cron: '17 8 * * 1-5'
+    - cron: '17 8 * * *'
   workflow_dispatch:
     inputs:
       mode:

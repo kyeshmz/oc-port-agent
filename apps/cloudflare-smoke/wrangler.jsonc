@@ -1,0 +1,26 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "oc-port-agent-sdk-smoke-kyeshmz-20261009",
+  "account_id": "324e23339afefd2f1f689e735c2b8789",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "minify": true,
+  "observability": {
+    "enabled": true,
+    "redact_query_string": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 }
+  },
+  "version_metadata": { "binding": "VERSION_METADATA" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "SDK_SMOKE", "class_name": "OpenCodeSmokeDO" }
+    ]
+  },
+  "exports": {
+    "OpenCodeSmokeDO": { "type": "durable-object", "storage": "sqlite" }
+  },
+  "secrets": { "required": ["SMOKE_TOKEN"] }
+}

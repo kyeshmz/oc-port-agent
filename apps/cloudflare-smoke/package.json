@@ -1,0 +1,23 @@
+{
+  "name": "@oc-port-agent/cloudflare-sdk-smoke",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^22.12.0 || ^24.0.0 || >=26.0.0"
+  },
+  "scripts": {
+    "types": "wrangler types --strict-vars=false",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "build": "wrangler deploy --dry-run --outdir .wrangler/build --metafile .wrangler/build-meta.json",
+    "deploy": "wrangler deploy",
+    "test:online": "node scripts/test-online.mjs"
+  },
+  "dependencies": {
+    "@opencode/sdk": "2.0.26"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "wrangler": "4.149.0"
+  }
+}

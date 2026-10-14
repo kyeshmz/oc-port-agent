@@ -1,0 +1,25 @@
+{
+  "repository": "kyeshmz/oc-port-agent-live-test-20261010",
+  "url": "https://github.com/kyeshmz/oc-port-agent-live-test-20261010",
+  "private": true,
+  "preparedAt": "2026-10-10T18:02:20.109Z",
+  "targetBranch": "main",
+  "targetCommit": "8cf62db4e306d8b40cdf7cb4a7b016333ded6655",
+  "upstreamBranch": "upstream",
+  "baselineCommit": "8cf62db4e306d8b40cdf7cb4a7b016333ded6655",
+  "upstreamCommit": "1bb823ad50fb85613fbde65712418a1ecf0a00d4",
+  "selectedChangedPaths": [
+    "reference/bom.js"
+  ],
+  "initialAcceptance": {
+    "passed": 2,
+    "failed": 1,
+    "expectedFailure": true
+  },
+  "stages": {
+    "repositoryPrepared": true,
+    "appInstalled": false,
+    "backendDeployed": false,
+    "liveSyncPassed": false
+  }
+}

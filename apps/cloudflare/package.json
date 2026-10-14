@@ -1,0 +1,29 @@
+{
+  "name": "@oc-port-agent/cloudflare",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^22.12.0 || ^24.0.0 || >=26.0.0"
+  },
+  "scripts": {
+    "build": "wrangler deploy --dry-run --outdir .wrangler/build --metafile .wrangler/build-meta.json",
+    "build:worker": "wrangler deploy --dry-run --containers-rollout=none --outdir .wrangler/worker-build --metafile .wrangler/worker-build-meta.json",
+    "typecheck": "tsc --project tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:runtime": "vitest run --project workerd",
+    "types": "wrangler types --strict-vars=false"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.0",
+    "@types/node": "22.19.7",
+    "typescript": "5.9.3",
+    "vitest": "5.0.3",
+    "wrangler": "4.149.0"
+  },
+  "dependencies": {
+    "@cloudflare/sandbox": "0.13.0-next.776.1",
+    "@opencode/plugin": "2.0.26",
+    "@opencode/sdk": "2.0.26"
+  }
+}

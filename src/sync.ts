@@ -1,7 +1,7 @@
-import { mkdtemp, mkdir, readFile, unlink, lstat, realpath } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, unlink, lstat, realpath, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { CONFIG, INTERNAL, STATE, matchesAny, policyHash, type Config, type Verification } from './config.js';
+import { dirname, join } from 'node:path';
+import { CONFIG, checkpointPath, protectedEdit, matchesAny, policyHash, type Config, type Verification } from './config.js';
 import { RESULT, invokeOpenCode, readReport, writePacket, type AgentReport } from './agent.js';
 import { clean, exists, jsonWrite, planSync, type Plan } from './upstream.js';
 import { git, run, type CommandResult } from './process.js';
@@ -12,6 +12,7 @@ export interface SyncOptions {
   full?: boolean;
   model?: string;
   publish?: PublishOptions;
+  config?: string;
   // Dependency injection for offline tests, not configurable through untrusted upstream.
   invoke?: (root: string, config: Config, packet: string, failure?: string) => Promise<void>;
 }
@@ -22,16 +23,61 @@ export async function changedFiles(root: string): Promise<string[]> {
   const untracked = (await git(root, ['ls-files', '--others', '--exclude-standard', '-z'])).split('\0');
   return [...new Set([...tracked, ...untracked].filter(Boolean))];
 }
+export function explicitInvocation(text: string): boolean {
+  const header = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(text)?.[1];
+  if (!header || /<<:|^["'](?:metadata|disable-model-invocation)["']:/m.test(header)) return false;
+  const lines = header.split(/\r?\n/);
+  const metadata = lines.filter(line => /^metadata:/.test(line));
+  const disabled = lines.filter(line => /^disable-model-invocation:/.test(line));
+  if (metadata.length > 1 || disabled.length > 1) return false;
+  if (metadata.length) {
+    if (!/^metadata:\s*$/.test(metadata[0]!)) return false;
+    const start = lines.indexOf(metadata[0]!) + 1;
+    const block: string[] = [];
+    for (const line of lines.slice(start)) {
+      if (line && !/^\s|^#/.test(line)) break;
+      if (line.trim() && !/^\s*#/.test(line)) block.push(line);
+    }
+    const indent = Math.min(...block.map(line => /^\s*/.exec(line)![0].length));
+    const children = block.filter(line => /^\s*/.exec(line)![0].length === indent);
+    if (children.some(line => /^\s*["']/.test(line))) return false;
+    const flags = children.filter(line => /^\s*opencode\/autoinvoke:/.test(line));
+    if (flags.length) return flags.length === 1 && /^\s*opencode\/autoinvoke:\s*false(?:\s+#.*)?\s*$/.test(flags[0]!);
+  }
+  return disabled.length === 1 && /^disable-model-invocation:\s*true(?:\s+#.*)?\s*$/.test(disabled[0]!);
+}
+export async function skillGate(root: string, config: Config): Promise<void> {
+  if (config.allowSkillEdits.length) {
+    for (const ancestor of ['.opencode', '.opencode/skills']) {
+      if (await exists(join(root, ancestor)) && (await lstat(join(root, ancestor))).isSymbolicLink()) throw new Error(`Skill symlink needs manual review: ${ancestor}`);
+    }
+  }
+  const scan = async (path: string, primary: string): Promise<void> => {
+    const file = join(root, path);
+    if (!await exists(file)) return;
+    const stat = await lstat(file);
+    if (stat.isSymbolicLink()) throw new Error(`Skill symlink needs manual review: ${path}`);
+    if (stat.isDirectory()) {
+      for (const name of await readdir(file)) await scan(`${path}/${name}`, primary);
+    } else if (path.endsWith('/SKILL.md')) {
+      if (path !== primary) throw new Error(`Nested skill registration is not authorized: ${path}`);
+      const text = await readFile(file, 'utf8');
+      if (!explicitInvocation(text)) throw new Error(`Updated skill must remain explicitly invoked: ${path}`);
+    }
+  };
+  for (const id of config.allowSkillEdits) await scan(`.opencode/skills/${id}`, `.opencode/skills/${id}/SKILL.md`);
+}
 export async function editGate(root: string, config: Config, plan: Plan, targetHead: string): Promise<string[]> {
   if ((await git(root, ['rev-parse', 'HEAD'])).trim() !== targetHead) throw new Error('The agent changed Git history. Refusing to publish or advance the checkpoint.');
   const paths = await changedFiles(root);
   const allowed = plan.selections.flatMap(selection => selection.targetPaths);
   for (const path of paths) {
-    if (matchesAny(path, [...INTERNAL, ...config.protectedPaths]) || !matchesAny(path, allowed)) throw new Error(`Out-of-scope or protected edit: ${path}. Worktree preserved for inspection; checkpoint not advanced.`);
+    if (protectedEdit(path, config) || !matchesAny(path, allowed)) throw new Error(`Out-of-scope or protected edit: ${path}. Worktree preserved for inspection; checkpoint not advanced.`);
     if (await exists(join(root, path))) {
       if ((await lstat(join(root, path))).isSymbolicLink()) throw new Error(`Changed symlink needs manual review: ${path}`);
     }
   }
+  await skillGate(root, config);
   return paths;
 }
 
@@ -63,7 +109,7 @@ export function prBody(plan: Plan, report: AgentReport, paths: string[], verific
 
 export async function synchronize(root: string, options: SyncOptions = {}): Promise<SyncResult> {
   await clean(root);
-  const { config, state, plan } = await planSync(root, options.full);
+  const { config, state, plan } = await planSync(root, options.full, options.config);
   if (options.model !== undefined) {
     if (!/^[^\s/]+\/[^\s]+$/.test(options.model)) throw new Error('--model must be provider/model, optionally followed by #variant');
     config.opencode.model = options.model;
@@ -79,6 +125,7 @@ export async function synchronize(root: string, options: SyncOptions = {}): Prom
   await git(root, ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '-b', branch, createdPath, targetHead]);
   const worktree = await realpath(createdPath);
   try {
+    await skillGate(worktree, config);
     const packet = await writePacket(worktree, config, plan);
     const originalPacket = await readFile(packet, 'utf8');
     let report: AgentReport = { summary: 'No selected upstream paths changed; all configured functionality remains outside this net diff.', decisions: [] };
@@ -121,8 +168,10 @@ export async function synchronize(root: string, options: SyncOptions = {}): Prom
       note: 'Agent decisions are claims for human review, not proof of behavioral equivalence. Checkpoint activates when this commit merges.',
     });
     // Only the host writes the next checkpoint, in the proposal branch (not the caller).
-    await jsonWrite(join(worktree, STATE), { ...state, lastSyncedCommit: plan.to });
-    await git(worktree, ['add', '--', ...paths, STATE, reportPath]);
+    const checkpoint = checkpointPath(config);
+    await mkdir(dirname(join(worktree, checkpoint)), { recursive: true });
+    await jsonWrite(join(worktree, checkpoint), { ...state, lastSyncedCommit: plan.to });
+    await git(worktree, ['add', '--', ...paths, checkpoint, reportPath]);
     const title = `${plan.mode === 'adopt' ? 'Adopt' : 'Sync'} upstream functionality ${plan.to.slice(0, 12)}`;
     await git(worktree, ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'user.name=oc-port-agent', '-c', 'user.email=oc-port-agent@users.noreply.github.com', 'commit', '-m', title]);
     const result: SyncResult = { status: 'proposal', worktree, branch, report: reportPath };

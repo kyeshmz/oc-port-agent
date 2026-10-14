@@ -1,12 +1,18 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 
 export const CONFIG = 'oc-port-agent.json';
 export const STATE = '.oc-port/state.json';
 export const INTERNAL = ['.git', '.git/**', '.oc-port/**', CONFIG, '.opencode/**', 'opencode.json', 'opencode.jsonc'];
 export const DEFAULT_PROTECTED = ['.github/workflows/**', 'AGENTS.md', '**/AGENTS.md', 'CLAUDE.md', '**/CLAUDE.md'];
+export const SKILL_PROTECTED = ['.opencode/skills/**/opencode.json', '.opencode/skills/**/opencode.jsonc', '.opencode/skills/**/AGENTS.md', '.opencode/skills/**/CLAUDE.md', '.opencode/skills/**/.opencode/**'];
 
+export interface SelectionInstructions {
+  goal: string;
+  adaptation: string[];
+  nonGoals: string[];
+}
 export interface Selection {
   id: string;
   description: string;
@@ -15,6 +21,7 @@ export interface Selection {
   targetPaths: string[];
   acceptance: string[];
   mappings: { upstream: string; target: string[] }[];
+  instructions?: SelectionInstructions;
 }
 export interface Verification {
   command: string;
@@ -30,6 +37,9 @@ export interface Config {
   verification: Verification[];
   opencode: { executable: string; model?: string; timeoutSeconds: number; maxAttempts: number; steps: number };
   limits: { maxCommits: number; maxContextBytes: number };
+  allowSkillEdits: string[];
+  baselineCommit?: string;
+  configurationPath?: string;
 }
 export interface State {
   version: 1;
@@ -52,6 +62,38 @@ function string(value: unknown, where: string): string {
 function strings(value: unknown, where: string, minimum = 0): string[] {
   if (!Array.isArray(value) || value.length < minimum) throw new Error(`${where} must be an array with at least ${minimum} items`);
   return value.map((item, i) => string(item, `${where}[${i}]`));
+}
+function validInstructionText(value: unknown, where: string): string {
+  if (typeof value !== 'string' || !value.trim() || /[\x00-\x1f\x7f\u0085\u2028\u2029]/.test(value)) {
+    throw new Error(`${where} must be nonempty, single-line Unicode text without control characters`);
+  }
+  let codePoints = 0;
+  for (let index = 0; index < value.length; index++) {
+    const unit = value.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) throw new Error(`${where} must contain valid Unicode text`);
+      index++;
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      throw new Error(`${where} must contain valid Unicode text`);
+    }
+    if (++codePoints > 4096) throw new Error(`${where} must contain at most 4096 Unicode code points`);
+  }
+  return value;
+}
+function instructionList(value: unknown, where: string): string[] {
+  if (!Array.isArray(value) || value.length > 32) throw new Error(`${where} must be an array of at most 32 items`);
+  return Array.from(value, (item, index) => validInstructionText(item, `${where}[${index}]`));
+}
+function instructions(value: unknown, where: string): SelectionInstructions {
+  const raw = object(value, where);
+  keys(raw, ['goal', 'adaptation', 'nonGoals'], where);
+  if (!Object.hasOwn(raw, 'goal')) throw new Error(`${where}.goal is required`);
+  return {
+    goal: validInstructionText(raw.goal, `${where}.goal`),
+    adaptation: raw.adaptation === undefined ? [] : instructionList(raw.adaptation, `${where}.adaptation`),
+    nonGoals: raw.nonGoals === undefined ? [] : instructionList(raw.nonGoals, `${where}.nonGoals`),
+  };
 }
 function integer(value: unknown, fallback: number, minimum: number, maximum: number, where: string): number {
   if (value === undefined) return fallback;
@@ -90,7 +132,7 @@ export const selected = (path: string, selection: Selection): boolean => matches
 
 export function parseConfig(input: unknown): Config {
   const root = object(input, 'config');
-  keys(root, ['$schema', 'version', 'upstream', 'selections', 'preserve', 'protectedPaths', 'verification', 'opencode', 'limits'], 'config');
+  keys(root, ['$schema', 'version', 'upstream', 'selections', 'preserve', 'protectedPaths', 'verification', 'opencode', 'limits', 'allowSkillEdits', 'baselineCommit'], 'config');
   if (root.$schema !== undefined) string(root.$schema, '$schema');
   if (root.version !== 1) throw new Error('config.version must be 1');
   const upstream = object(root.upstream, 'upstream');
@@ -107,7 +149,7 @@ export function parseConfig(input: unknown): Config {
   const ids = new Set<string>();
   const selections = root.selections.map((raw, i): Selection => {
     const s = object(raw, `selections[${i}]`);
-    keys(s, ['id', 'description', 'upstreamPaths', 'excludeUpstreamPaths', 'targetPaths', 'acceptance', 'mappings'], 'selection');
+    keys(s, ['id', 'description', 'upstreamPaths', 'excludeUpstreamPaths', 'targetPaths', 'acceptance', 'mappings', 'instructions'], 'selection');
     const id = string(s.id, 'selection.id');
     if (!/^[a-z0-9][a-z0-9-]*$/.test(id) || ids.has(id)) throw new Error(`Selection IDs must be unique lowercase slugs: ${id}`);
     ids.add(id);
@@ -123,6 +165,7 @@ export function parseConfig(input: unknown): Config {
       excludeUpstreamPaths: patterns(s.excludeUpstreamPaths ?? [], 'selection.excludeUpstreamPaths'),
       targetPaths: patterns(s.targetPaths, 'selection.targetPaths', 1),
       acceptance: strings(s.acceptance, 'selection.acceptance', 1), mappings,
+      ...(s.instructions !== undefined ? { instructions: instructions(s.instructions, 'selection.instructions') } : {}),
     };
   });
   if (!Array.isArray(root.verification) || !root.verification.length) throw new Error('Configure at least one trusted verification command; a build alone does not establish parity');
@@ -138,6 +181,13 @@ export function parseConfig(input: unknown): Config {
   keys(oc, ['executable', 'model', 'timeoutSeconds', 'maxAttempts', 'steps'], 'opencode');
   const limits = object(root.limits ?? {}, 'limits');
   keys(limits, ['maxCommits', 'maxContextBytes'], 'limits');
+  const allowSkillEdits = strings(root.allowSkillEdits ?? [], 'allowSkillEdits');
+  if (new Set(allowSkillEdits).size !== allowSkillEdits.length || allowSkillEdits.some(id => !/^[a-z0-9]+(-[a-z0-9]+)*$/.test(id) || id.length > 64)) throw new Error('allowSkillEdits must contain unique, exact lowercase skill IDs, not paths or globs');
+  for (const id of allowSkillEdits) {
+    if (!selections.some(selection => selection.targetPaths.some(path => path.startsWith(`.opencode/skills/${id}/`)))) throw new Error(`allowSkillEdits ${id} needs an explicit target path inside that skill directory`);
+  }
+  const baselineCommit = root.baselineCommit === undefined ? undefined : string(root.baselineCommit, 'baselineCommit');
+  if (baselineCommit !== undefined && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(baselineCommit)) throw new Error('baselineCommit must be an explicitly reviewed immutable commit, never HEAD');
   return {
     version: 1, upstream: { repository, ref }, selections,
     preserve: strings(root.preserve ?? [], 'preserve'),
@@ -153,14 +203,32 @@ export function parseConfig(input: unknown): Config {
       maxCommits: integer(limits.maxCommits, 100, 1, 10000, 'limits.maxCommits'),
       maxContextBytes: integer(limits.maxContextBytes, 1_000_000, 1000, 50_000_000, 'limits.maxContextBytes'),
     },
+    allowSkillEdits,
+    ...(baselineCommit !== undefined ? { baselineCommit } : {}),
   };
 }
 
-export async function loadConfig(root: string): Promise<Config> {
-  return parseConfig(JSON.parse(await readFile(join(root, CONFIG), 'utf8')));
+export function skillEditPatterns(config: Config): string[] {
+  return config.selections.flatMap(selection => selection.targetPaths).filter(path => config.allowSkillEdits.some(id => path.startsWith(`.opencode/skills/${id}/`)));
+}
+export function protectedEdit(path: string, config: Config): boolean {
+  const internal = INTERNAL.filter(pattern => pattern !== '.opencode/**');
+  if (matchesAny(path, [...internal, ...SKILL_PROTECTED, ...config.protectedPaths]) || path === config.configurationPath) return true;
+  return matchesAny(path, ['.opencode/**']) && !matchesAny(path, skillEditPatterns(config));
+}
+export function checkpointPath(config: Config): string {
+  const file = config.configurationPath ?? CONFIG;
+  return file === CONFIG ? STATE : `.oc-port/checkpoints/${createHash('sha256').update(file).digest('hex').slice(0, 24)}.json`;
+}
+export async function loadConfig(root: string, file = CONFIG): Promise<Config> {
+  if (!safePath(file) || /[?*]/.test(file)) throw new Error('--config must be an exact repository-relative file');
+  const directory = await realpath(root);
+  const path = await realpath(join(root, file));
+  if (!path.startsWith(directory + '/')) throw new Error('--config escapes the target repository');
+  return { ...parseConfig(JSON.parse(await readFile(path, 'utf8'))), configurationPath: file };
 }
 export function policyHash(config: Config): string {
-  return createHash('sha256').update(JSON.stringify({ upstream: config.upstream, selections: config.selections, preserve: config.preserve, protectedPaths: config.protectedPaths, verification: config.verification })).digest('hex');
+  return createHash('sha256').update(JSON.stringify({ upstream: config.upstream, selections: config.selections, preserve: config.preserve, protectedPaths: config.protectedPaths, verification: config.verification, ...(config.allowSkillEdits.length ? { allowSkillEdits: config.allowSkillEdits } : {}) })).digest('hex');
 }
 export function parseState(raw: unknown, config: Config): State {
   const s = object(raw, 'state');

@@ -1,0 +1,10 @@
+node_modules/
+dist/
+.types/
+coverage/
+.wrangler/
+__pycache__/
+.dev.vars
+.env
+.env.*
+!.env.example

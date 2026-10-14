@@ -1,0 +1,112 @@
+{
+  "schemaVersion": 1,
+  "startedAt": "2026-10-09T22:25:02.263Z",
+  "accountId": "324e23339afefd2f1f689e735c2b8789",
+  "workerName": "oc-port-agent-sdk-smoke-kyeshmz-20261009",
+  "sdkVersion": "2.0.26",
+  "wranglerVersion": "4.149.0",
+  "initialTargetCheck": "Wrangler deployments list reported the target Worker not found before initial deployment",
+  "deployments": {
+    "initial": {
+      "deploymentId": "f66879e9-2152-4ef0-8936-7924028dcc2c",
+      "versionId": "d6a24359-5b16-4aea-8958-11d090b2bdb8"
+    },
+    "preResume": {
+      "deploymentId": "5eded6cc-0a0d-4bd0-aab4-cf6d44d8cbfa",
+      "versionId": "a7d528e7-88d3-4c11-991c-7cea1fc0ab1c"
+    },
+    "resumedSecretUpload": {
+      "deploymentId": "887f440c-85cc-4969-9c73-f26d67862830",
+      "versionId": "bda44a6f-652c-41f9-8bae-11d7f9766450"
+    },
+    "resumeCodeDeploy": {
+      "deploymentId": "addfdec9-4fde-46d8-9d95-eccefa43cdc3",
+      "versionId": "ad0439b7-4179-4709-88f2-ceada326391f"
+    },
+    "redeploy": {
+      "deploymentId": "a333874e-1c80-4761-b1a7-93f87adf5e23",
+      "versionId": "51cccc78-9519-4676-8bde-c53661f45211"
+    }
+  },
+  "checks": {
+    "preexistingWorker": "matched this package's recorded smoke deployment",
+    "health": {
+      "status": 200,
+      "attempts": 1,
+      "body": {
+        "status": "ok",
+        "versionId": "bda44a6f-652c-41f9-8bae-11d7f9766450"
+      }
+    },
+    "unauthorized": {
+      "status": 401
+    },
+    "authenticatedWrite": {
+      "status": 200,
+      "serverVersion": "unknown",
+      "bootId": "7ec57e74-23ac-48ba-8166-75fbb83b475c",
+      "workerVersion": {
+        "id": "bda44a6f-652c-41f9-8bae-11d7f9766450",
+        "timestamp": "2026-10-09T22:25:13.336162Z"
+      },
+      "sessionId": "ses_oc_port_agent_sdk_smoke_phase6",
+      "sdkSessionGetId": "ses_oc_port_agent_sdk_smoke_phase6",
+      "sessionCreated": true,
+      "sessionCreatedThisRequest": false,
+      "sessionRetrieved": true,
+      "checkpoint": {
+        "key": "phase6_checkpoint",
+        "value": "oc-port-agent-sdk-smoke-persisted-v1"
+      },
+      "checkpointWritten": true
+    },
+    "healthAfterRedeploy": {
+      "status": 200,
+      "attempts": 1
+    },
+    "idleWaitSeconds": 150,
+    "redeployRead": {
+      "status": 200,
+      "serverVersion": "unknown",
+      "bootId": "7ec57e74-23ac-48ba-8166-75fbb83b475c",
+      "workerVersion": {
+        "id": "bda44a6f-652c-41f9-8bae-11d7f9766450",
+        "timestamp": "2026-10-09T22:25:13.336162Z"
+      },
+      "sessionId": "ses_oc_port_agent_sdk_smoke_phase6",
+      "sdkSessionGetId": "ses_oc_port_agent_sdk_smoke_phase6",
+      "checkpoint": {
+        "key": "phase6_checkpoint",
+        "value": "oc-port-agent-sdk-smoke-persisted-v1"
+      }
+    }
+  },
+  "url": "https://oc-port-agent-sdk-smoke-kyeshmz-20261009.kye-324.workers.dev",
+  "resume": true,
+  "priorSuccessfulPersistenceObservation": {
+    "testedAt": "2026-10-09T22:14:42.950Z",
+    "write": {
+      "bootId": "7b6cc9f3-66e6-433e-a914-350baee3e171",
+      "workerVersionId": "1f3b6919-d290-4b72-9d9d-75b457066380",
+      "sessionId": "ses_oc_port_agent_sdk_smoke_phase6",
+      "checkpointValue": "oc-port-agent-sdk-smoke-persisted-v1"
+    },
+    "postRedeployRead": {
+      "bootId": "fed814d9-d7c5-4e02-a65a-99911989bad8",
+      "workerVersionId": "1480c699-ece1-4a15-943b-bfce2f57e24a",
+      "sessionId": "ses_oc_port_agent_sdk_smoke_phase6",
+      "checkpointValue": "oc-port-agent-sdk-smoke-persisted-v1"
+    },
+    "sdkSessionIdUnchanged": true,
+    "appCheckpointUnchanged": true,
+    "workerVersionChanged": true,
+    "doBootIdChanged": true
+  },
+  "persistenceAcrossRedeploy": {
+    "sdkSessionIdUnchanged": true,
+    "appCheckpointUnchanged": true,
+    "workerVersionChanged": false,
+    "doBootIdChanged": false
+  },
+  "finishedAt": "2026-10-09T22:27:58.441Z"
+}

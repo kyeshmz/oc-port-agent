@@ -1,0 +1,62 @@
+{
+  "$schema": "../schema/oc-port-policy.schema.json",
+  "version": 1,
+  "upstream": {
+    "repository": "https://github.com/kyeshmz/oc-port-demo-rust.git",
+    "ref": "main"
+  },
+  "selections": [
+    {
+      "id": "parser-parity",
+      "description": "Keep the Python target parser aligned with selected behavior from the separate Rust reference.",
+      "upstreamPaths": ["crates/parser/src/**", "crates/parser/tests/**"],
+      "targetPaths": ["src/parser/**", "tests/parser/**"],
+      "acceptance": [
+        "Shared fixtures produce equivalent parsed values and error classifications.",
+        "Relevant upstream regression cases have corresponding Python target tests for Unicode, offsets, and boundary behavior.",
+        "The configured Python tests pass unchanged apart from additive regression cases."
+      ],
+      "mappings": [
+        { "upstream": "crates/parser/src/**", "target": ["src/parser/**"] },
+        { "upstream": "crates/parser/tests/**", "target": ["tests/parser/**"] }
+      ],
+      "instructions": {
+        "goal": "Port the selected Rust parser behavior into the registered target's existing Python parser while preserving the target's module API and observable error categories.",
+        "adaptation": [
+          "Use the target's existing Python types, exceptions, and module layout; translate behavior rather than copying Rust syntax.",
+          "Use shared fixtures and add focused target regression tests for relevant upstream behavior changes.",
+          "Preserve documented offset semantics and report blocked if byte offsets cannot be represented without an unapproved API change."
+        ],
+        "nonGoals": [
+          "Do not add Rust bindings, a parser generator, or new dependencies.",
+          "Do not change the target-only normalization helper, package exports, or unrelated parser features.",
+          "Do not edit tests/parser/fixtures/**; those fixtures are protected input to the target verification suite."
+        ]
+      }
+    }
+  ],
+  "preserve": [
+    "Keep the target-only normalization helper and public Python exports unchanged.",
+    "Do not change trusted regression fixtures or weaken parser assertions."
+  ],
+  "protectedPaths": ["tests/parser/fixtures/**"],
+  "verification": [
+    {
+      "command": "python3",
+      "args": ["-B", "-m", "unittest", "discover", "-s", "tests/parser"],
+      "timeoutSeconds": 300
+    }
+  ],
+  "limits": {
+    "maxCommits": 100,
+    "maxChangedPaths": 5000,
+    "maxFiles": 200,
+    "maxContextBytes": 250000,
+    "maxFileBytes": 250000,
+    "maxResponseBytes": 1000000,
+    "maxVerificationOutputBytes": 65536,
+    "maxJobSeconds": 1800,
+    "maxAttempts": 2,
+    "maxSteps": 50
+  }
+}

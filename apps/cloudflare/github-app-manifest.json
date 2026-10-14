@@ -1,0 +1,18 @@
+{
+  "name": "oc-port-agent-self-hosted",
+  "url": "https://github.com/kyeshmz/oc-port-agent",
+  "hook_attributes": {
+    "url": "https://YOUR_WORKER_HOST/webhooks/github",
+    "active": true
+  },
+  "public": false,
+  "default_permissions": {
+    "contents": "write",
+    "metadata": "read",
+    "pull_requests": "write"
+  },
+  "default_events": [
+    "pull_request",
+    "push"
+  ]
+}

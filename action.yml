@@ -30,6 +30,9 @@ inputs:
   base:
     description: Explicit target base branch. Required when publishing.
     default: ''
+  config:
+    description: Optional repository-relative policy file. Each nondefault file has an independent checkpoint.
+    default: ''
 runs:
   using: composite
   steps:
@@ -71,6 +74,7 @@ runs:
         OC_PORT_API_KEY: ${{ inputs.api-key }}
         OC_PORT_API_KEY_ENV: ${{ inputs.api-key-env }}
         OC_PORT_MODEL: ${{ inputs.model }}
+        OC_PORT_CONFIG: ${{ inputs.config }}
       run: |
         set -euo pipefail
         node "$OC_PORT_TOOL/dist/src/action.js"

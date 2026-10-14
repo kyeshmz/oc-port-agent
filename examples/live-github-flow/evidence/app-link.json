@@ -1,0 +1,26 @@
+{
+  "checkedAt": "2026-10-10T19:05:33.192Z",
+  "appId": 5266090,
+  "slug": "oc-port-agent-20261010",
+  "owner": "kyeshmz",
+  "permissions": {
+    "contents": "write",
+    "metadata": "read",
+    "pull_requests": "write"
+  },
+  "events": [
+    "pull_request"
+  ],
+  "webhookUrl": "https://oc-port-agent-live-test-20261010.kye-324.workers.dev/webhooks/github",
+  "providerKeyConfigured": false,
+  "installations": [
+    {
+      "id": 170044765,
+      "account": "kyeshmz",
+      "repositorySelection": "selected",
+      "suspended": false,
+      "onlyTestRepository": true,
+      "repositoryCount": 1
+    }
+  ]
+}

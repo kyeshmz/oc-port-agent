@@ -1,0 +1,69 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "oc-port-agent-live-test-20261010",
+  "account_id": "324e23339afefd2f1f689e735c2b8789",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-09",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "observability": {
+    "enabled": true,
+    "redact_query_string": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 }
+  },
+  "vars": {
+    "GITHUB_APP_ID": "5266090",
+    "OPENCODE_PROVIDER": "opencode",
+    "OPENCODE_MODEL": "gpt-6-luna"
+  },
+  "secrets": {
+    "required": [
+      "ADMIN_TOKEN",
+      "GITHUB_PRIVATE_KEY",
+      "GITHUB_WEBHOOK_SECRET",
+      "OPENCODE_API_KEY"
+    ]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "oc-port-agent-live-test-20261010",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "./migrations"
+    }
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "JOB_QUEUE", "queue": "oc-port-agent-live-test-jobs" }
+    ],
+    "consumers": [
+      {
+        "queue": "oc-port-agent-live-test-jobs",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "oc-port-agent-live-test-jobs-dlq",
+        "max_concurrency": 5,
+        "retry_delay": 30
+      }
+    ]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "TARGET_JOBS", "class_name": "TargetJobDO" },
+      { "name": "SANDBOX", "class_name": "Sandbox" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["TargetJobDO", "Sandbox"] }
+  ],
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "docker.io/cloudflare/sandbox:0.13.0-next.776.1-python",
+      "max_instances": 1,
+      "instance_type": "standard-1"
+    }
+  ]
+}

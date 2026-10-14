@@ -1,0 +1,19 @@
+# Install this in an UPSTREAM repository you control. Each push to main asks the target repository
+# to run its sync workflow. Replace TARGET_OWNER/TARGET_REPO with the target repository.
+# OC_PORT_DISPATCH_TOKEN needs only Contents write on the target: a fine-grained PAT or a GitHub App
+# installation token. Store it as a secret in this upstream repository.
+# A third-party upstream cannot install this, so the target's daily scheduled run covers it.
+name: Notify target of upstream push
+on:
+  push:
+    branches: [main]
+permissions: {}
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch upstream-push to the target repository
+        run: gh api repos/TARGET_OWNER/TARGET_REPO/dispatches -f event_type=upstream-push
+        env:
+          GH_TOKEN: ${{ secrets.OC_PORT_DISPATCH_TOKEN }}

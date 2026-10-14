@@ -6,11 +6,23 @@ import { startPrivateServer } from '../src/server.js';
 import { agentDefinition, invokeOpenCode } from '../src/agent.js';
 import { run } from '../src/process.js';
 import { synchronize } from '../src/sync.js';
-import { changeUpstream, fixture } from './helpers.js';
+import { setBaseline } from '../src/upstream.js';
+import { changeUpstream, commit, configInput, fixture } from './helpers.js';
 
 test('actual CLI adapter uses V2 flags, strips publishing tokens and removes its temporary agent', async t => {
   const f = await fixture(t);
   await changeUpstream(f.upstream);
+  const goal = 'Port cancellation-aware retry behavior into the target client.';
+  const rawConfig = configInput(f.upstream);
+  (rawConfig.selections as Record<string, unknown>[])[0]!.instructions = {
+    goal,
+    adaptation: ['Use the target AbortSignal API.'],
+    nonGoals: ['Do not edit authentication helpers.'],
+  };
+  await writeFile(join(f.target, 'oc-port-agent.json'), JSON.stringify(rawConfig));
+  await commit(f.target, 'add structured porting intent');
+  await setBaseline(f.target, f.baseline);
+  await commit(f.target, 'review structured intent baseline');
   const executable = join(f.directory, 'fake-opencode');
   await writeFile(executable, `#!/usr/bin/env node
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -23,8 +35,9 @@ if (!args.includes('--server') || !args.includes('--file') || !args.includes('--
 if (process.env.GH_TOKEN || process.env.GITHUB_TOKEN) process.exit(4);
 const packet = JSON.parse(readFileSync(args[args.indexOf('--file') + 1], 'utf8'));
 if (packet.plan.selections[0].id !== 'retry-policy') process.exit(5);
+if (packet.policy.selections[0].instructions.goal !== ${JSON.stringify(goal)} || packet.policy.selections[0].instructions.adaptation[0] !== 'Use the target AbortSignal API.' || packet.policy.selections[0].instructions.nonGoals[0] !== 'Do not edit authentication helpers.') process.exit(7);
 const agent = readFileSync('.opencode/agents/oc-port-agent.md', 'utf8');
-if (!agent.includes('permissions:')) process.exit(6);
+if (!agent.includes('permissions:') || !agent.includes('trusted operator-authored task intent') || !agent.includes('report the conflict as blocked for operator review')) process.exit(6);
 writeFileSync('src/client.mjs', 'export const retries = 2;\\n');
 writeFileSync('.oc-port/result.json', JSON.stringify({ summary: 'Adapted retries', decisions: [{ selection: 'retry-policy', status: 'applied', reason: 'Adapted retries' }] }));
 console.log(JSON.stringify({ type: 'text', text: 'Done' }));

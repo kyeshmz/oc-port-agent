@@ -4,7 +4,27 @@ Selectively adopt and keep upstream functionality aligned with a target reposito
 
 This is not a fork-merging bot or a language translator alone. Track a retry policy, API behavior, bug fix, tests, documentation, or configuration across repositories with different languages **or the same language and different architectures**. Describe what you want, which upstream paths are evidence, which target paths may change, and what must remain different.
 
-Status: an initial implementation with offline integration tests and a passing local Rust → TypeScript synchronization demo using the real OpenCode V2 CLI. Private GitHub repositories have been created for the [tool](https://github.com/kyeshmz/oc-port-agent), [Rust reference](https://github.com/kyeshmz/oc-port-demo-rust), and [TypeScript target](https://github.com/kyeshmz/oc-port-demo-typescript). The model-powered GitHub run still needs CI secrets; no scheduled workflow is enabled. One controlled demo is not a guarantee of correctness for arbitrary projects.
+Status: an initial implementation with offline integration tests, a passing local Rust → TypeScript synchronization demo, and two passing pinned public-upstream adoption cases using the real OpenCode V2 CLI. The hosted model-powered sync has not yet been verified; the demo workflow is manual-only. These controlled tests are not a guarantee of correctness for arbitrary projects.
+
+A separate, experimental self-hosted [Cloudflare GitHub App backend](apps/cloudflare/README.md) is under development; it is not production-approved and does not replace this CLI.
+
+## See it in action
+
+The Rust → TypeScript demo repositories are public. You can browse the source, the generated adaptation, and its recorded verification without installing anything.
+
+| Test repository | Role | What to inspect |
+| --- | --- | --- |
+| [oc-port-demo-rust](https://github.com/kyeshmz/oc-port-demo-rust) | Rust upstream reference | [Retry implementation and tests](https://github.com/kyeshmz/oc-port-demo-rust/blob/main/src/lib.rs) |
+| [oc-port-demo-typescript](https://github.com/kyeshmz/oc-port-demo-typescript) | TypeScript downstream | [Tracking policy](https://github.com/kyeshmz/oc-port-demo-typescript/blob/main/oc-port-agent.json), [adapted code and tests](https://github.com/kyeshmz/oc-port-demo-typescript/commit/d870f98ee66a7b8a5c56bfe4ff2808755722193e) |
+| [oc-port-agent-live-test-20261010](https://github.com/kyeshmz/oc-port-agent-live-test-20261010) | Separate GitHub App / Cloudflare integration fixture | Private; requires repository access. The full App flow is not yet verified. |
+
+### Follow the recorded sync
+
+1. **Rust changes:** [the upstream commit](https://github.com/kyeshmz/oc-port-demo-rust/commit/d9935134e34a35f5a746f83e1ad17f6b8dd669e4) raises the retry base from 100ms to 250ms and the cap from 1000ms to 2000ms. The unchanged TypeScript implementation then fails differential parity against compiled Rust.
+2. **OpenCode adapts TypeScript:** [the generated sync commit](https://github.com/kyeshmz/oc-port-demo-typescript/commit/d870f98ee66a7b8a5c56bfe4ff2808755722193e) updates the implementation and regression tests while preserving input validation and the target-only `retryLabel` helper.
+3. **The host verifies the proposal:** [the committed report](https://github.com/kyeshmz/oc-port-demo-typescript/blob/d870f98ee66a7b8a5c56bfe4ff2808755722193e/.oc-port/reports/4ae2bcd679cd-sync-c8355996e97e6bb9b3879468c051c3f246981641.json) records the selected upstream range, changed files, and successful host-run verification commands. The demo explicitly merged the verified proposal locally and confirmed a second sync was a model-free no-op.
+
+This is a completed local CLI run whose commits and report are published on GitHub, not an automated GitHub App run. For future hosted runs, see the target's [Live upstream sync workflow](https://github.com/kyeshmz/oc-port-demo-typescript/actions/workflows/upstream-sync.yml) and [pull requests](https://github.com/kyeshmz/oc-port-demo-typescript/pulls). That workflow is manual-only, requires operator-configured secrets, and never auto-merges.
 
 ## How it works
 
@@ -17,21 +37,7 @@ Status: an initial implementation with offline integration tests and a passing l
 
 No automatic merging, force pushes, silent truncation, implicit baselines, or wholesale copying of upstream code.
 
-## Requirements and installation
-
-- Node.js 22+, Git, Linux or macOS.
-- An installed and authenticated **OpenCode V2** CLI. This implementation was checked against local CLI flags in v2.0.26; V1 is not supported.
-- GitHub CLI (`gh`) and target-repo credentials only when using `--pr`.
-- Install the target project's dependencies yourself. Verification executes in a new worktree, so dependencies ignored by Git are **not copied from your main checkout**. For example, configure `npm ci` before `npm test`, or provision dependencies on an isolated runner.
-
-```sh
-cd /path/to/oc-port-agent
-npm ci
-npm run build
-node /path/to/oc-port-agent/dist/src/cli.js --help
-```
-
-The package is local/private and has not been published to npm. You can also run `npm link` to expose its `oc-port-agent` executable locally.
+For requirements and installation, see [CONTRIBUTING.md](CONTRIBUTING.md#requirements-and-installation).
 
 ## Configure a target
 
@@ -63,6 +69,16 @@ An individual tracking rule looks like this:
 
 `description` names the desired functionality; paths define the context and edit boundary. A rule can watch an entire directory but request only one feature. Include relevant dependencies/tests in `upstreamPaths`, and allow target test files in `targetPaths`.
 
+For detailed operator intent, add optional `instructions` with a required `goal` and optional `adaptation` / `nonGoals` lists. `description` stays a short summary; the instruction object explains the specific outcome and target adaptation. These values do not grant permissions or widen the declared paths. See [the structured-instructions guide](docs/porting-instructions.md), [CLI example](examples/porting-policy.json), and [hosted policy example](examples/hosted-porting-policy.json).
+
+```json
+"instructions": {
+  "goal": "Port the selected behavior into the target's existing API.",
+  "adaptation": ["Use the target's existing error and cancellation conventions."],
+  "nonGoals": ["Do not change unrelated dependencies or target-only helpers."]
+}
+```
+
 ### Configuration reference
 
 | Field | Meaning |
@@ -71,9 +87,11 @@ An individual tracking rule looks like this:
 | `$schema` | Optional editor reference to `./node_modules/oc-port-agent/schema/oc-port-agent.schema.json` when installed as a package. Runtime validation is still enforced by the tool. |
 | `upstream.repository` | HTTPS Git URL, without embedded credentials, or an absolute local repo path. |
 | `upstream.ref` | Branch name (default `main` in the scaffold). Not a tag or arbitrary revision expression. |
-| `selections` | One or more rules: unique `id`, `description`, `upstreamPaths`, `targetPaths`, and nonempty `acceptance`. Optional `excludeUpstreamPaths` and `mappings`. |
+| `selections` | One or more rules: unique `id`, `description`, `upstreamPaths`, `targetPaths`, and nonempty `acceptance`. Optional `excludeUpstreamPaths`, `mappings`, and detailed `instructions`. |
 | `preserve` | Intentional target differences and compatibility requirements. These are instructions; use tests to enforce critical ones. |
-| `protectedPaths` | Additional edit-denied paths. Defaults protect CI workflows and agent instruction files. Explicitly replace this array to opt into adapting those files. Tool internals/config/OpenCode configuration remain protected regardless. |
+| `protectedPaths` | Additional edit-denied paths. Defaults protect CI workflows and agent instruction files. Explicitly replace this array to opt into adapting those files. Tool internals, the active policy, checkpoints, agents, and OpenCode configuration remain protected regardless. |
+| `allowSkillEdits` | Optional exact skill IDs. Opens only explicitly selected paths under `.opencode/skills/<id>/`; default `.opencode/**` protection is unchanged without this opt-in. Nested skills, agent instructions, config and symlinks remain blocked. |
+| `baselineCommit` | Optional reviewed immutable SHA used only when that policy has no saved checkpoint. Never accepts HEAD or replaces an existing checkpoint. |
 | `verification` | Nonempty list of trusted `{ command, args, timeoutSeconds? }` checks. Each runs without shell interpolation, from the proposal worktree. Default per-command timeout: 300 seconds. |
 | `opencode.executable` | CLI executable, default `opencode`. |
 | `opencode.model` | Optional `provider/model#variant`. Otherwise uses OpenCode's configured default. No model/provider is hardcoded. |
@@ -88,6 +106,21 @@ Globs are repository-relative and case-sensitive: `*` matches within one compone
 Verification commands are trusted executable configuration, not model suggestions. If you intentionally configure `sh -c`, you are authorizing that shell command. Add typechecks, behavioral regression tests, shared fixtures, differential tests, and docs validation as appropriate. **A passing build or model-written report is not proof of parity.**
 
 ## Initial adoption and ongoing sync
+
+### Multiple upstreams and skill maintenance
+
+Use one policy per import and pass `--config <repository-relative.json>` to `check`, `baseline`, or `sync`. Each nondefault policy path uses its own tracked `.oc-port/checkpoints/<path-hash>.json`; legacy `oc-port-agent.json` retains `.oc-port/state.json` and its existing policy hash. Different repositories never share a checkpoint. The GitHub Action accepts the same path as its `config` input.
+
+For skill packs, explicitly set `allowSkillEdits` to exact IDs and select their `.opencode/skills/<id>/**` target paths. This does not authorize edits to agents, MCP/OpenCode config, nested registrations, or tool state, and the agent still cannot load skills or run shell/network tools. Host checks require explicit-invocation frontmatter and reject skill-tree symlinks. Unsupported or ambiguous metadata needs manual review, not a permissive fallback.
+
+An optional `baselineCommit` acknowledges an existing imported source revision on first use without mutating the caller. A check verifies ancestry against the freshly fetched upstream. A successful proposal records its checkpoint only after host verification; it becomes effective only after merge. Existing checkpoints always take precedence, and changed policies still require explicit baseline review. Do not choose current HEAD merely to hide pending changes.
+
+```sh
+oc-port-agent check --config policies/playwright-cli.json
+oc-port-agent sync --config policies/playwright-cli.json
+```
+
+These commands do not schedule themselves. A target workflow can serially check its policies and publish one verified draft proposal, waiting for review before the next. No automatic merging is added.
 
 For an existing target that already corresponds to an upstream commit:
 
@@ -175,7 +208,9 @@ OpenCode is the default; no Anthropic key is required. The OpenCode example uses
 
 The API key is mapped into the **private server process environment**, never command arguments, repository config, checkpoints, or committed reports. Actions masking is applied. A fresh, runner-local OpenCode database prevents saved OAuth credentials on self-hosted runners from taking precedence over the supplied CI key. This provider key is separate from the private server's generated authentication password and from the GitHub publication token. There is no interactive `/connect` step.
 
-Configure project dependencies and `OC_PORT_GITHUB_TOKEN` (target contents + PR write permissions). Prefer a narrowly scoped GitHub App installation token or fine-grained token. A non-default token can also allow the created PR to trigger normal target CI; GitHub's default workflow token has event-trigger restrictions. Scheduled runs poll from the target, so you need no control over the upstream repo. Do not use `pull_request_target`, run on untrusted forks, or grant the agent publication credentials.
+Configure project dependencies and `OC_PORT_GITHUB_TOKEN` (target contents + PR write permissions). Prefer a narrowly scoped GitHub App installation token or fine-grained token. A non-default token can also allow the created PR to trigger normal target CI; GitHub's default workflow token has event-trigger restrictions. Do not use `pull_request_target`, run on untrusted forks, or grant the agent publication credentials.
+
+The target workflow starts on an `upstream-push` repository dispatch. If you control the upstream repo, install the [upstream notify example](examples/upstream-notify-workflow.yml) there. It sends that dispatch on every push to `main`, so the target sync starts right after the upstream changes. Its `OC_PORT_DISPATCH_TOKEN` needs only Contents write on the target. The dispatch is only a wake-up signal. The sync always reads the upstream repository and ref from the committed policy, and the workflow never reads `github.event.client_payload`. A once-daily scheduled run is the fallback. It polls from the target, so it also covers third-party upstreams you do not control.
 
 The official action invokes `opencode github run`; this wrapper uses its own deterministic sync/checkpoint/verification pipeline instead, with OpenCode V2 as the restricted coding runner. It does not inherit the official action's GitHub App/OIDC flow.
 
@@ -190,24 +225,8 @@ The official action invokes `opencode github run`; this wrapper uses its own det
 - Net diffs are used rather than replaying every transient upstream commit. Apply/skip decisions are per tracking rule, with upstream commit provenance preserved in the evidence.
 - Skipped decisions with reasons still require review. Declarative preservation rules cannot guarantee compatibility without good tests.
 
-## Development
+## Contributing
 
-```sh
-npm ci
-npm run typecheck
-npm test
-# Optional: parse the generated agent using the installed V2 CLI; no model calls.
-OC_PORT_TEST_OPENCODE=1 npm test
-```
-
-Tests use disposable local Git repos and a fake model adapter. They exercise upstream fetching, initial adoption, checkpoint activation on merge, deletion context, scope protection, verification failure/retries, complete reports, and the real CLI adapter's arguments/cleanup. No paid model calls or live GitHub writes are required.
+See [CONTRIBUTING.md](CONTRIBUTING.md#development) for development setup and testing instructions.
 
 See [docs/research.md](docs/research.md) for the existing projects investigated and why this is a separate implementation.
-
-## Live demonstration
-
-The adjacent [`../oc-port-agent-demo`](../oc-port-agent-demo/README.md) contains two independent Git repos with the packaged tool installed in both apps. The TypeScript tracking policy points at the Rust repo and the packaged JSON Schema.
-
-The live test changed only Rust's retry policy (100 → 250ms base, 1000 → 2000ms cap), observed the old TypeScript parity check fail, invoked real OpenCode to update TypeScript source/tests, verified against compiled Rust, explicitly merged the proposal into the target, and confirmed a second sync is a no-op. The target-only helper and input validation survived. Full evidence is in `../oc-port-agent-demo/evidence/e2e-result.json`.
-
-That demo also caught a real CLI integration issue: child processes inherited the caller's `PWD` and could select the wrong repository. The runner now sets `PWD` to the canonical proposal worktree, with a regression test. Private-server startup also waits for asynchronous agent registration and handles its authentication instead of touching the user's shared daemon.

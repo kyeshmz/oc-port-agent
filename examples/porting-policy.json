@@ -1,0 +1,57 @@
+{
+  "$schema": "../schema/oc-port-agent.schema.json",
+  "version": 1,
+  "upstream": {
+    "repository": "https://github.com/kyeshmz/oc-port-demo-rust.git",
+    "ref": "main"
+  },
+  "selections": [
+    {
+      "id": "parser-parity",
+      "description": "Keep the TypeScript parser behavior aligned with the Rust reference, not its implementation language.",
+      "upstreamPaths": ["crates/parser/src/**", "crates/parser/tests/**"],
+      "targetPaths": ["src/parser/**", "test/parser/**"],
+      "acceptance": [
+        "Shared fixtures produce equivalent parsed values and error classifications.",
+        "Relevant upstream regression cases have corresponding target tests for Unicode, offsets, and boundary behavior.",
+        "The configured target typecheck and parser parity tests pass without changing their assertions."
+      ],
+      "mappings": [
+        { "upstream": "crates/parser/src/**", "target": ["src/parser/**"] },
+        { "upstream": "crates/parser/tests/**", "target": ["test/parser/**"] }
+      ],
+      "instructions": {
+        "goal": "Port the selected Rust parser behavior into the existing TypeScript parser so the target has the same observable values and error categories while retaining its own public API.",
+        "adaptation": [
+          "Use the target's existing TypeScript types, module layout, and error conventions; translate behavior rather than Rust syntax.",
+          "Use shared fixtures and add focused target regression tests for each relevant upstream behavior change.",
+          "Keep byte-offset behavior explicit where JavaScript string indices differ from Rust byte offsets; block if the existing API cannot express the required result safely."
+        ],
+        "nonGoals": [
+          "Do not add a Rust runtime, FFI, parser generator, or new dependency.",
+          "Do not change target-only helpers in src/shared/target-parser-helpers.ts or silently change the exported TypeScript API.",
+          "Do not broaden the selection to unrelated parser features or rewrite protected test fixtures."
+        ]
+      }
+    }
+  ],
+  "preserve": [
+    "Keep src/shared/target-parser-helpers.ts and the target's public TypeScript exports unchanged.",
+    "Preserve the target's error-handling conventions; report blocked if parity requires an unapproved API change."
+  ],
+  "protectedPaths": [
+    ".github/workflows/**",
+    "AGENTS.md",
+    "**/AGENTS.md",
+    "CLAUDE.md",
+    "**/CLAUDE.md",
+    "test/parser/fixtures/**"
+  ],
+  "verification": [
+    { "command": "npm", "args": ["run", "typecheck"] },
+    { "command": "npm", "args": ["test"] },
+    { "command": "npm", "args": ["run", "test:parser-parity"], "timeoutSeconds": 600 }
+  ],
+  "opencode": { "timeoutSeconds": 1200, "maxAttempts": 2, "steps": 100 },
+  "limits": { "maxCommits": 100, "maxContextBytes": 1000000 }
+}
