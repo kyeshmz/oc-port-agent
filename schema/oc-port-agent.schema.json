@@ -10,6 +10,7 @@
     "version": { "const": 1 },
     "baselineCommit": { "type": "string", "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$", "description": "Explicitly reviewed bootstrap baseline used only when this policy has no checkpoint. Never resolves HEAD and never replaces a saved checkpoint." },
     "allowSkillEdits": { "type": "array", "uniqueItems": true, "items": { "type": "string", "maxLength": 64, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" }, "description": "Opt in to exact skill IDs under .opencode/skills. Explicit target paths are also required; agents, config, nested skill registrations and checkpoints remain protected." },
+    "reviewMetadataPaths": { "$ref": "#/$defs/strings", "description": "Exact, already selected provenance/registry files that may record skipped reviews. No globs or scope expansion; applied decisions still need nonmetadata target changes." },
     "upstream": {
       "type": "object", "additionalProperties": false, "required": ["repository", "ref"],
       "properties": { "repository": { "type": "string", "minLength": 1 }, "ref": { "type": "string", "minLength": 1 } }

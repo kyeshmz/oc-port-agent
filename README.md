@@ -92,6 +92,7 @@ For detailed operator intent, add optional `instructions` with a required `goal`
 | `protectedPaths` | Additional edit-denied paths. Defaults protect CI workflows and agent instruction files. Explicitly replace this array to opt into adapting those files. Tool internals, the active policy, checkpoints, agents, and OpenCode configuration remain protected regardless. |
 | `allowSkillEdits` | Optional exact skill IDs. Opens only explicitly selected paths under `.opencode/skills/<id>/`; default `.opencode/**` protection is unchanged without this opt-in. Nested skills, agent instructions, config and symlinks remain blocked. |
 | `baselineCommit` | Optional reviewed immutable SHA used only when that policy has no saved checkpoint. Never accepts HEAD or replaces an existing checkpoint. |
+| `reviewMetadataPaths` | Optional exact, already selected provenance/registry files. Skipped reviews may update these receipts only; applied decisions require changes outside them. Protected paths still win. |
 | `verification` | Nonempty list of trusted `{ command, args, timeoutSeconds? }` checks. Each runs without shell interpolation, from the proposal worktree. Default per-command timeout: 300 seconds. |
 | `opencode.executable` | CLI executable, default `opencode`. |
 | `opencode.model` | Optional `provider/model#variant`. Otherwise uses OpenCode's configured default. No model/provider is hardcoded. |

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, relative, sep } from 'node:path';
 
 export const CONFIG = 'oc-port-agent.json';
 export const STATE = '.oc-port/state.json';
@@ -38,6 +38,7 @@ export interface Config {
   opencode: { executable: string; model?: string; timeoutSeconds: number; maxAttempts: number; steps: number };
   limits: { maxCommits: number; maxContextBytes: number };
   allowSkillEdits: string[];
+  reviewMetadataPaths: string[];
   baselineCommit?: string;
   configurationPath?: string;
 }
@@ -132,7 +133,7 @@ export const selected = (path: string, selection: Selection): boolean => matches
 
 export function parseConfig(input: unknown): Config {
   const root = object(input, 'config');
-  keys(root, ['$schema', 'version', 'upstream', 'selections', 'preserve', 'protectedPaths', 'verification', 'opencode', 'limits', 'allowSkillEdits', 'baselineCommit'], 'config');
+  keys(root, ['$schema', 'version', 'upstream', 'selections', 'preserve', 'protectedPaths', 'verification', 'opencode', 'limits', 'allowSkillEdits', 'baselineCommit', 'reviewMetadataPaths'], 'config');
   if (root.$schema !== undefined) string(root.$schema, '$schema');
   if (root.version !== 1) throw new Error('config.version must be 1');
   const upstream = object(root.upstream, 'upstream');
@@ -188,6 +189,10 @@ export function parseConfig(input: unknown): Config {
   }
   const baselineCommit = root.baselineCommit === undefined ? undefined : string(root.baselineCommit, 'baselineCommit');
   if (baselineCommit !== undefined && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(baselineCommit)) throw new Error('baselineCommit must be an explicitly reviewed immutable commit, never HEAD');
+  const reviewMetadataPaths = patterns(root.reviewMetadataPaths ?? [], 'reviewMetadataPaths');
+  for (const path of reviewMetadataPaths) {
+    if (/[?*]/.test(path) || !selections.some(selection => matchesAny(path, selection.targetPaths))) throw new Error('reviewMetadataPaths must be exact files already inside the declared target scope');
+  }
   return {
     version: 1, upstream: { repository, ref }, selections,
     preserve: strings(root.preserve ?? [], 'preserve'),
@@ -204,6 +209,7 @@ export function parseConfig(input: unknown): Config {
       maxContextBytes: integer(limits.maxContextBytes, 1_000_000, 1000, 50_000_000, 'limits.maxContextBytes'),
     },
     allowSkillEdits,
+    reviewMetadataPaths,
     ...(baselineCommit !== undefined ? { baselineCommit } : {}),
   };
 }
@@ -224,11 +230,12 @@ export async function loadConfig(root: string, file = CONFIG): Promise<Config> {
   if (!safePath(file) || /[?*]/.test(file)) throw new Error('--config must be an exact repository-relative file');
   const directory = await realpath(root);
   const path = await realpath(join(root, file));
-  if (!path.startsWith(directory + '/')) throw new Error('--config escapes the target repository');
+  const location = relative(directory, path);
+  if (!location || location === '..' || location.startsWith('..' + sep) || isAbsolute(location)) throw new Error('--config escapes the target repository');
   return { ...parseConfig(JSON.parse(await readFile(path, 'utf8'))), configurationPath: file };
 }
 export function policyHash(config: Config): string {
-  return createHash('sha256').update(JSON.stringify({ upstream: config.upstream, selections: config.selections, preserve: config.preserve, protectedPaths: config.protectedPaths, verification: config.verification, ...(config.allowSkillEdits.length ? { allowSkillEdits: config.allowSkillEdits } : {}) })).digest('hex');
+  return createHash('sha256').update(JSON.stringify({ upstream: config.upstream, selections: config.selections, preserve: config.preserve, protectedPaths: config.protectedPaths, verification: config.verification, ...(config.allowSkillEdits.length ? { allowSkillEdits: config.allowSkillEdits } : {}), ...(config.reviewMetadataPaths.length ? { reviewMetadataPaths: config.reviewMetadataPaths } : {}), ...(config.configurationPath && config.configurationPath !== CONFIG ? { configurationPath: config.configurationPath } : {}) })).digest('hex');
 }
 export function parseState(raw: unknown, config: Config): State {
   const s = object(raw, 'state');

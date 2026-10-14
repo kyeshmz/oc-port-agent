@@ -29,6 +29,8 @@ test('skill opt-in is exact, explicit, and changes the policy hash', () => {
   const withoutOptIn = parseConfig({ ...input(), allowSkillEdits: [] });
   assert.notEqual(policyHash(withoutOptIn), policyHash(enabled));
   assert.throws(() => parseConfig({ ...input(), baselineCommit: 'HEAD' }), /immutable/);
+  assert.throws(() => parseConfig({ ...input(), reviewMetadataPaths: ['**'] }), /exact files/);
+  assert.throws(() => parseConfig({ ...input(), reviewMetadataPaths: ['unselected.json'] }), /exact files/);
 });
 
 test('explicit invocation checks hierarchy, duplicate fields, and V2 precedence', () => {
@@ -70,6 +72,7 @@ test('each policy has an independent bootstrap/checkpoint and sync leaves the ca
   const one = await loadConfig(f.target, 'policies/one.json');
   const two = await loadConfig(f.target, 'policies/two.json');
   assert.notEqual(checkpointPath(one), checkpointPath(two));
+  assert.notEqual(policyHash(one), policyHash(two));
   const head = await changeUpstream(f.upstream);
   const check = await planSync(f.target, false, 'policies/one.json');
   assert.equal(check.plan.from, f.baseline);
@@ -98,3 +101,34 @@ test('skill gate rejects nested registrations and symlink ancestors', async t =>
   await symlink(join(other.directory, 'outside'), join(other.target, '.opencode'));
   await assert.rejects(skillGate(other.target, config), /symlink/);
 });
+
+for (const scenario of ['metadata-only skipped', 'implementation skipped', 'metadata-only applied'] as const) {
+  test(`review receipts enforce status semantics: ${scenario}`, async t => {
+    const f = await fixture(t);
+    await mkdir(join(f.target, 'policies'));
+    await mkdir(join(f.target, '.opencode/skills/sample'), { recursive: true });
+    await writeFile(join(f.target, '.opencode/skills/sample/SKILL.md'), skill());
+    await writeFile(join(f.target, 'audit.json'), '{}\n');
+    const policy = input(f.upstream);
+    (policy.selections as { targetPaths: string[] }[])[0]!.targetPaths.push('audit.json');
+    policy.reviewMetadataPaths = ['audit.json'];
+    policy.baselineCommit = f.baseline;
+    policy.verification = [{ command: process.execPath, args: ['-e', 'process.exit(0)'] }];
+    await writeFile(join(f.target, 'policies/metadata.json'), JSON.stringify(policy));
+    await commit(f.target, 'approve scoped review receipts');
+    await changeUpstream(f.upstream);
+    const invoke = async (root: string): Promise<void> => {
+      await writeFile(join(root, 'audit.json'), '{"reviewed":true}\n');
+      if (scenario === 'implementation skipped') await writeFile(join(root, '.opencode/skills/sample/SKILL.md'), skill('Unclaimed implementation change'));
+      const status = scenario === 'metadata-only applied' ? 'applied' : 'skipped';
+      await writeFile(join(root, '.oc-port/result.json'), JSON.stringify({ summary: 'Review receipt', decisions: [{ selection: 'sample', status, reason: 'Already equivalent.' }] }));
+    };
+    if (scenario === 'metadata-only skipped') {
+      const result = await synchronize(f.target, { config: 'policies/metadata.json', invoke });
+      assert.equal(result.status, 'proposal');
+      assert.equal(await readFile(join(f.target, 'audit.json'), 'utf8'), '{}\n');
+    } else {
+      await assert.rejects(synchronize(f.target, { config: 'policies/metadata.json', invoke }), /only skipped|without any corresponding target changes/);
+    }
+  });
+}

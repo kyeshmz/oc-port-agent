@@ -81,12 +81,13 @@ export async function editGate(root: string, config: Config, plan: Plan, targetH
   return paths;
 }
 
-function assertDecisionEdits(report: AgentReport, paths: string[], plan: Plan): void {
-  if (paths.length && report.decisions.every(decision => decision.status !== 'applied')) throw new Error('The agent changed files but reported only skipped decisions');
+function assertDecisionEdits(report: AgentReport, paths: string[], plan: Plan, config: Config): void {
+  const implementation = paths.filter(path => !config.reviewMetadataPaths.includes(path));
+  if (implementation.length && report.decisions.every(decision => decision.status !== 'applied')) throw new Error('The agent changed files but reported only skipped decisions');
   for (const decision of report.decisions) {
     if (decision.status === 'applied') {
       const selection = plan.selections.find(s => s.id === decision.selection)!;
-      if (!paths.some(path => matchesAny(path, selection.targetPaths))) throw new Error(`Selection ${decision.selection} was marked applied without any corresponding target changes`);
+      if (!implementation.some(path => matchesAny(path, selection.targetPaths))) throw new Error(`Selection ${decision.selection} was marked applied without any corresponding target changes`);
     }
   }
 }
@@ -143,7 +144,7 @@ export async function synchronize(root: string, options: SyncOptions = {}): Prom
       if (await readFile(packet, 'utf8') !== originalPacket) throw new Error('Upstream packet was modified by the agent');
       try {
         if (plan.selections.length) report = await readReport(worktree, plan);
-        assertDecisionEdits(report, paths, plan);
+        assertDecisionEdits(report, paths, plan, config);
       } catch (error) {
         failure = (error as Error).message;
         if (attempt === config.opencode.maxAttempts) throw error;
@@ -153,7 +154,7 @@ export async function synchronize(root: string, options: SyncOptions = {}): Prom
       verification = checked.results;
       // Trusted verification must not introduce changes outside the allowed scope either.
       paths = await editGate(worktree, config, plan, targetHead);
-      if (!checked.failure) { assertDecisionEdits(report, paths, plan); passed = true; break; }
+      if (!checked.failure) { assertDecisionEdits(report, paths, plan, config); passed = true; break; }
       failure = checked.failure;
       if (!plan.selections.length) break;
     }
