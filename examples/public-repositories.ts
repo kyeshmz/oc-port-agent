@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { CONFIG, STATE } from '../src/config.js';
+import { checkpointPath, CONFIG, loadConfig, STATE } from '../src/config.js';
+import { planCollection } from '../src/collection.js';
 import { git, run } from '../src/process.js';
 import { initialize, jsonWrite, planSync, setBaseline } from '../src/upstream.js';
 import { synchronize, type SyncOptions } from '../src/sync.js';
@@ -251,7 +252,7 @@ async function persistCase(evidence: CaseEvidence, options: RunCaseOptions): Pro
 }
 
 async function commandCheck(
-  evidence: CaseEvidence,
+  evidence: { checks: CommandEvidence[] },
   name: string,
   command: string,
   args: string[],
@@ -265,7 +266,7 @@ async function commandCheck(
   return matchedExpectation;
 }
 
-async function cloneAndFreeze(source: string, destination: string, commit: string, evidence: CaseEvidence): Promise<void> {
+async function cloneAndFreeze(source: string, destination: string, commit: string, evidence: { checks: CommandEvidence[] }): Promise<void> {
   await mkdir(dirname(destination), { recursive: true });
   const args = ['clone', '--bare', '--no-tags', source, destination];
   const clone = await run('git', args, dirname(destination), 300, {
@@ -282,7 +283,7 @@ async function cloneAndFreeze(source: string, destination: string, commit: strin
   }
 }
 
-async function writeFixedFixture(target: string, item: PublicCase, url: string, commit: string, licenseText: string): Promise<void> {
+async function writeFixedFixture(target: string, item: PublicCase, url: string, commit: string, licenseText: string, attributionPath = 'UPSTREAM-ATTRIBUTION.txt'): Promise<void> {
   const implementation = join(target, item.implementationPath);
   const helper = join(target, item.helperPath);
   const testPath = join(target, item.testPath);
@@ -328,7 +329,8 @@ async function writeFixedFixture(target: string, item: PublicCase, url: string, 
     '',
     licenseText,
   ].filter((line, index, lines) => line !== '' || (index > 0 && lines[index - 1] !== '')).join('\n');
-  await writeFile(join(target, 'UPSTREAM-ATTRIBUTION.txt'), `${attribution.trimEnd()}\n`, { flag: 'wx' });
+  await mkdir(dirname(join(target, attributionPath)), { recursive: true });
+  await writeFile(join(target, attributionPath), `${attribution.trimEnd()}\n`, { flag: 'wx' });
 }
 
 async function findLicense(snapshot: string, commit: string): Promise<string> {
@@ -752,6 +754,148 @@ export async function runPublicRepositoryCase(item: PublicCase, options: RunCase
     await persist();
   }
   evidence.durationMs = Date.now() - started;
+  await persist();
+  return evidence;
+}
+
+export interface CollectionEvidence {
+  version: 1;
+  status: 'running' | 'passed' | 'failed';
+  model: string;
+  sourceKind: 'public-upstreams' | 'offline-test-fixtures';
+  bounds: { maxAttempts: number; maxSteps: number; timeoutSeconds: number; contextLimitBytes: number };
+  target: string;
+  evidencePath: string;
+  startedAt: string;
+  durationMs?: number;
+  stage: string;
+  sources: { id: PublicCaseId; repository: string; commit: string; snapshot: string; policy: string; checkpoint: string; report?: string }[];
+  checks: CommandEvidence[];
+  fixedHashes: Record<string, string>;
+  callerPreserved: boolean;
+  proposalValidated: boolean;
+  merged: boolean;
+  noOp: boolean;
+  proposal?: Awaited<ReturnType<typeof synchronize>>;
+  failureKind?: string;
+  failedWorktree?: string;
+}
+
+export async function runPublicRepositoryCollection(options: RunSuiteOptions & {
+  artifactsRoot: string;
+  upstreams?: Partial<Record<PublicCaseId, { repository: string; commit: string }>>;
+}): Promise<CollectionEvidence> {
+  const model = options.model ?? DEFAULT_MODEL;
+  if (!isModel(model)) throw new Error('Model must be provider/model with an optional #variant');
+  const selected = options.cases ?? PUBLIC_CASES.map(item => item.id);
+  if (!selected.length || new Set(selected).size !== selected.length || selected.some(id => !PUBLIC_CASES.some(item => item.id === id))) throw new Error('Select unique known public cases');
+  if (!options.live && (!options.invoke || selected.some(id => !options.upstreams?.[id]))) throw new Error('Public collection requires --live, or local upstreams and a fake adapter for offline tests');
+  const items = selected.map(id => PUBLIC_CASES.find(item => item.id === id)!);
+  const target = join(options.artifactsRoot, 'target');
+  const evidencePath = join(options.artifactsRoot, 'evidence', 'collection.json');
+  const evidence: CollectionEvidence = {
+    version: 1, status: 'running', model, target, evidencePath, startedAt: isoNow(), stage: 'setup',
+    sourceKind: options.live ? 'public-upstreams' : 'offline-test-fixtures',
+    bounds: { maxAttempts: MAX_ATTEMPTS, maxSteps: MAX_STEPS, timeoutSeconds: ATTEMPT_TIMEOUT_SECONDS, contextLimitBytes: CONTEXT_LIMIT_BYTES },
+    sources: [], checks: [], fixedHashes: {}, callerPreserved: false, proposalValidated: false, merged: false, noOp: false,
+  };
+  const persist = async (): Promise<void> => {
+    await mkdir(dirname(evidencePath), { recursive: true });
+    await jsonWrite(evidencePath, evidence);
+  };
+  await persist();
+  try {
+    await mkdir(target, { recursive: true });
+    await git(target, ['init', '-b', 'main']);
+    await git(target, ['config', 'user.name', 'oc-port collection fixture']);
+    await git(target, ['config', 'user.email', 'oc-port-collection@example.invalid']);
+    await git(target, ['config', 'commit.gpgsign', 'false']);
+    await git(target, ['config', 'core.hooksPath', '/dev/null']);
+    for (const item of items) {
+      const input = options.upstreams?.[item.id] ?? { repository: item.publicUrl, commit: item.pinnedCommit };
+      const snapshot = join(options.artifactsRoot, `${item.id}.git`);
+      await cloneAndFreeze(input.repository, snapshot, input.commit, evidence);
+      const attribution = `attribution/${item.id}.txt`;
+      await writeFixedFixture(target, item, input.repository, input.commit, await findLicense(snapshot, input.commit), attribution);
+      const policy = `policies/${item.id}.json`;
+      await initialize(target, snapshot, PINNED_REF, policy);
+      await jsonWrite(join(target, policy), configuration(item, snapshot, model));
+      await setBaseline(target, input.commit, policy);
+      const checkpoint = checkpointPath(await loadConfig(target, policy));
+      evidence.sources.push({ id: item.id, repository: input.repository, commit: input.commit, snapshot, policy, checkpoint });
+      for (const path of [policy, item.testPath, item.helperPath, attribution]) evidence.fixedHashes[path] = await fileHash(target, path);
+    }
+    await jsonWrite(join(target, 'ports.json'), { version: 1, policies: evidence.sources.map(source => source.policy) });
+    for (const path of ['ports.json', '.gitignore']) evidence.fixedHashes[path] = await fileHash(target, path);
+    await git(target, ['add', '-A']);
+    await git(target, ['commit', '-m', 'Configure one target gathering multiple public upstreams']);
+    const callerHead = (await git(target, ['rev-parse', 'HEAD'])).trim();
+    const callerHashes: Record<string, string> = {};
+    for (const path of [...items.map(item => item.implementationPath), ...evidence.sources.map(source => source.checkpoint)]) callerHashes[path] = await fileHash(target, path);
+    evidence.stage = 'initial-failing-tests';
+    await persist();
+    for (const item of items) {
+      if (!await commandCheck(evidence, `${item.id}:initial`, item.verification.command, item.verification.args, target, 'fail')) throw new Error('Initial acceptance tests did not fail');
+    }
+    evidence.stage = 'preview';
+    const preview = await planCollection(target, 'ports.json', true);
+    for (const [index, source] of evidence.sources.entries()) {
+      const plan = preview.sources[index]!.plan;
+      const item = items[index]!;
+      if (plan.from !== source.commit || plan.to !== source.commit || plan.after.length !== 1 || plan.after[0]!.path !== item.sourcePath) throw new Error('Pinned collection context mismatch');
+    }
+    evidence.stage = 'synchronize';
+    await persist();
+    const proposal = await synchronize(target, { collection: 'ports.json', full: true, model, ...(options.invoke ? { invoke: options.invoke } : {}) });
+    evidence.proposal = proposal;
+    if (proposal.status !== 'proposal' || !proposal.worktree || !proposal.branch || !proposal.report || proposal.sources?.length !== items.length) throw new Error('No complete collection proposal');
+    evidence.stage = 'validate-proposal';
+    const aggregate = JSON.parse(await readFile(join(proposal.worktree, proposal.report), 'utf8'));
+    if (aggregate.targetBase !== callerHead || aggregate.verification.length !== items.length || aggregate.verification.some((s: { results: { code: number }[] }) => !s.results.length || s.results.some(check => check.code !== 0))) throw new Error('Combined verification evidence incomplete');
+    const allowed = new Set([proposal.report]);
+    for (const [index, source] of evidence.sources.entries()) {
+      const result = proposal.sources[index]!;
+      if (result.config !== source.policy || result.to !== source.commit || !result.report) throw new Error('Source provenance mismatch');
+      source.report = result.report;
+      const report = JSON.parse(await readFile(join(proposal.worktree, result.report), 'utf8'));
+      const item = items[index]!;
+      if (report.upstream.repository !== source.snapshot || report.from !== source.commit || report.to !== source.commit
+        || report.report.decisions.length !== 1 || report.report.decisions[0].selection !== item.id || report.report.decisions[0].status !== 'applied'
+        || report.changedTargetPaths.length !== 1 || report.changedTargetPaths[0] !== item.implementationPath) throw new Error('Source report mismatch');
+      if (JSON.parse(await readFile(join(proposal.worktree, source.checkpoint), 'utf8')).lastSyncedCommit !== source.commit) throw new Error('Source checkpoint mismatch');
+      for (const path of [item.implementationPath, source.checkpoint, result.report]) allowed.add(path);
+    }
+    const proposalFiles = (await git(proposal.worktree, ['diff', '--name-only', callerHead, 'HEAD'])).split('\n').filter(Boolean);
+    if (proposalFiles.some(path => !allowed.has(path))) throw new Error('Unexpected collection proposal files');
+    for (const [path, hash] of Object.entries(evidence.fixedHashes)) if (await fileHash(proposal.worktree, path) !== hash) throw new Error('Protected fixture file changed');
+    for (const [path, hash] of Object.entries(callerHashes)) if (await fileHash(target, path) !== hash) throw new Error('Caller changed before merge');
+    if ((await git(target, ['rev-parse', 'HEAD'])).trim() !== callerHead) throw new Error('Caller history changed before merge');
+    evidence.callerPreserved = true;
+    for (const item of items) {
+      if (await fileHash(proposal.worktree, item.implementationPath) === callerHashes[item.implementationPath]) throw new Error('Implementation was not adapted');
+      if (!await commandCheck(evidence, `${item.id}:proposal`, item.verification.command, item.verification.args, proposal.worktree, 'pass')) throw new Error('Independent proposal verification failed');
+    }
+    for (const [path, hash] of Object.entries(evidence.fixedHashes)) if (await fileHash(proposal.worktree, path) !== hash) throw new Error('Verification changed a protected file');
+    if ((await git(proposal.worktree, ['status', '--porcelain'])).trim()) throw new Error('Proposal is dirty');
+    evidence.proposalValidated = true;
+    evidence.stage = 'merge-disposable-target';
+    await persist();
+    await git(target, ['merge', '--ff-only', proposal.branch]);
+    evidence.merged = true;
+    for (const item of items) if (!await commandCheck(evidence, `${item.id}:merged`, item.verification.command, item.verification.args, target, 'pass')) throw new Error('Merged verification failed');
+    for (const [path, hash] of Object.entries(evidence.fixedHashes)) if (await fileHash(target, path) !== hash) throw new Error('Merged fixed file mismatch');
+    const noop = await synchronize(target, { collection: 'ports.json', invoke: async () => { throw new Error('No-op called a model'); } });
+    if (noop.status !== 'up-to-date' || noop.sources?.some(source => source.status !== 'up-to-date')) throw new Error('Collection follow-up was not a model-free no-op');
+    evidence.noOp = true;
+    evidence.status = 'passed';
+    evidence.stage = 'complete';
+  } catch (error) {
+    evidence.status = 'failed';
+    evidence.failureKind = safeFailureKind(error);
+    const proposal = proposalFromError(error);
+    if (proposal.path) evidence.failedWorktree = proposal.path;
+  }
+  evidence.durationMs = Date.now() - Date.parse(evidence.startedAt);
   await persist();
   return evidence;
 }

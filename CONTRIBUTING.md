@@ -30,4 +30,6 @@ OC_PORT_TEST_OPENCODE=1 npm test
 
 Tests use disposable local Git repos and a fake model adapter. They exercise upstream fetching, initial adoption, checkpoint activation on merge, deletion context, scope protection, verification failure/retries, complete reports, and the real CLI adapter's arguments/cleanup. No paid model calls or live GitHub writes are required.
 
+Multi-repository coverage also gathers both existing public-case fixtures into one target/proposal offline. `npm run test:collection -- --live` repeats that test against the pinned public upstreams with the real OpenCode runner; artifacts are retained and nothing is pushed. See [docs/multiple-repositories.md](docs/multiple-repositories.md).
+
 The pinned public-repository harness is separate and explicitly opt-in: `npm run test:public -- --help` shows its options. Live runs require `--live`; the default `npm test` remains offline and credential-free. Both cases passed a real run using `openai/gpt-6-luna#max`, with protected tests and model-free second-sync checks. See [docs/public-repository-tests.md](docs/public-repository-tests.md) for the pinned cases, safeguards, bounds, observed results, and evidence location.

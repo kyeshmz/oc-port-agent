@@ -33,6 +33,9 @@ inputs:
   config:
     description: Optional repository-relative policy file. Each nondefault file has an independent checkpoint.
     default: ''
+  collection:
+    description: Optional repository-relative collection of policy files to gather into one proposal. Cannot be combined with config.
+    default: ''
 runs:
   using: composite
   steps:
@@ -75,6 +78,7 @@ runs:
         OC_PORT_API_KEY_ENV: ${{ inputs.api-key-env }}
         OC_PORT_MODEL: ${{ inputs.model }}
         OC_PORT_CONFIG: ${{ inputs.config }}
+        OC_PORT_COLLECTION: ${{ inputs.collection }}
       run: |
         set -euo pipefail
         node "$OC_PORT_TOOL/dist/src/action.js"

@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { CONFIG } from '../src/config.js';
 import { RESULT } from '../src/agent.js';
 import { git } from '../src/process.js';
-import { PUBLIC_CASES, parseArgs, runPublicRepositoryCase } from '../examples/public-repositories.js';
+import { PUBLIC_CASES, parseArgs, runPublicRepositoryCase, runPublicRepositoryCollection } from '../examples/public-repositories.js';
 
 async function commit(root: string, message: string): Promise<string> {
   await git(root, ['add', '-A']);
@@ -143,4 +143,36 @@ test('regex-escaping public case runs fully offline against a local bare fixture
 
 test('BOM-stripping public case runs fully offline against a local bare fixture', async t => {
   await exerciseOfflineCase(t, 'strip-bom');
+});
+
+test('existing public fixtures gather into one target through the offline collection harness', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'oc-port-public-collection-offline-'));
+  const regex = await localBareUpstream(join(root, 'regex'));
+  const bom = await localBareUpstream(join(root, 'bom'));
+  const artifactsRoot = join(root, 'artifacts');
+  t.after(async () => {
+    await removeOwnedWorktrees(join(artifactsRoot, 'target'));
+    await rm(root, { recursive: true, force: true });
+  });
+  const calls: string[] = [];
+  const evidence = await runPublicRepositoryCollection({
+    live: false, model: 'offline/fake#test', artifactsRoot,
+    upstreams: { 'escape-string-regexp': { repository: regex.path, commit: regex.commit }, 'strip-bom': { repository: bom.path, commit: bom.commit } },
+    invoke: async (proposal, config) => {
+      const id = config.selections[0]!.id;
+      calls.push(id);
+      if (id === 'escape-string-regexp') {
+        await writeFile(join(proposal, 'src/regex_port.py'), 'def escape_regex(value):\n    if not isinstance(value, str):\n        raise TypeError("value must be a string")\n    specials = set("|{}()[]^$+*?.") | {chr(92)}\n    slash = chr(92)\n    return "".join(slash + "x2d" if char == "-" else slash + char if char in specials else char for char in value)\n');
+      } else {
+        await writeFile(join(proposal, 'src/strip-prefix.js'), "export function removePrefixBom(value) {\n  if (typeof value !== 'string') throw new TypeError('value must be a string');\n  return value.charCodeAt(0) === 0xfeff ? value.slice(1) : value;\n}\n");
+      }
+      await writeFile(join(proposal, RESULT), JSON.stringify({ summary: 'Applied offline behavior', decisions: [{ selection: id, status: 'applied', reason: 'Adapted selected behavior into the existing target API.' }] }));
+    },
+  });
+  assert.equal(evidence.status, 'passed', `${evidence.stage}: ${evidence.failureKind}`);
+  assert.deepEqual(calls, ['escape-string-regexp', 'strip-bom']);
+  assert.ok(evidence.callerPreserved && evidence.proposalValidated && evidence.merged && evidence.noOp);
+  assert.equal(evidence.sources.length, 2);
+  assert.equal(evidence.proposal?.sources?.length, 2);
+  assert.equal(evidence.checks.filter(check => check.name.endsWith(':initial') && check.matchedExpectation).length, 2);
 });

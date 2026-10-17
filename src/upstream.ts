@@ -114,8 +114,9 @@ export async function planSync(root: string, full = false, file = CONFIG): Promi
   return { config, state, plan };
 }
 
-export async function initialize(root: string, repository: string, ref: string): Promise<void> {
-  if (await exists(join(root, CONFIG))) throw new Error(`${CONFIG} already exists; it was not overwritten`);
+export async function initialize(root: string, repository: string, ref: string, file = CONFIG): Promise<void> {
+  if (!safePath(file) || /[?*]/.test(file)) throw new Error('--config must be an exact repository-relative file');
+  if (await exists(join(root, file))) throw new Error(`${file} already exists; it was not overwritten`);
   const config = {
     version: 1,
     upstream: { repository, ref },
@@ -135,9 +136,16 @@ export async function initialize(root: string, repository: string, ref: string):
   // Validate before materializing any configuration, including CLI input.
   const { parseConfig } = await import('./config.js');
   parseConfig(config);
-  await writeFile(join(root, CONFIG), `${JSON.stringify(config, null, 2)}\n`, { flag: 'wx' });
+  let parent = root;
+  for (const part of file.split('/').slice(0, -1)) {
+    parent = join(parent, part);
+    if (!await exists(parent)) await mkdir(parent);
+    const stat = await lstat(parent);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('--config parent directories cannot be symlinks');
+  }
+  await writeFile(join(root, file), `${JSON.stringify(config, null, 2)}\n`, { flag: 'wx' });
   const ignore = join(root, '.gitignore');
-  const addition = '\n# oc-port-agent local cache and model output\n.oc-port/cache/\n.oc-port/context/\n.oc-port/result.json\n.oc-port/agent-output.log\n';
   const previous = await exists(ignore) ? await readFile(ignore, 'utf8') : '';
-  await writeFile(ignore, previous + addition);
+  const missing = ['.oc-port/cache/', '.oc-port/context/', '.oc-port/result.json', '.oc-port/agent-output.log'].filter(path => !previous.split(/\r?\n/).includes(path));
+  if (missing.length) await writeFile(ignore, previous + '\n# oc-port-agent local cache and model output\n' + missing.join('\n') + '\n');
 }

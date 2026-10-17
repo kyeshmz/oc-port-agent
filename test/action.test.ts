@@ -30,6 +30,11 @@ test('action model override and initial adoption map to explicit CLI arguments',
   const invocation = actionInvocation({ OC_PORT_MODE: 'adopt', OC_PORT_API_KEY: 'test-key', OC_PORT_MODEL: 'provider/model#variant', OC_PORT_PUBLISH: 'true', OC_PORT_REPOSITORY: 'owner/repo', OC_PORT_BASE: 'main' });
   assert.deepEqual(invocation.args, ['sync', '--full', '--model', 'provider/model#variant', '--pr', '--repo', 'owner/repo', '--base', 'main']);
 });
+test('action routes a port collection to one combined proposal and rejects conflicting inputs', () => {
+  assert.deepEqual(actionInvocation({ OC_PORT_MODE: 'check', OC_PORT_COLLECTION: 'ports.json' }).args, ['check', '--collection', 'ports.json']);
+  assert.deepEqual(actionInvocation({ OC_PORT_MODE: 'adopt', OC_PORT_API_KEY: 'test-key', OC_PORT_COLLECTION: 'ports.json' }).args, ['sync', '--full', '--collection', 'ports.json']);
+  assert.throws(() => actionInvocation({ OC_PORT_MODE: 'check', OC_PORT_CONFIG: 'a.json', OC_PORT_COLLECTION: 'ports.json' }), /cannot be combined/);
+});
 test('workflow passes credentials to oc-port-agent, not to checkout or the install step', async () => {
   const workflow = await readFile('examples/github-workflow.yml', 'utf8');
   const checkout = workflow.split('- name: Check out target base')[1]!.split('- name: Check or synchronize selected functionality')[0]!;

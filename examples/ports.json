@@ -1,0 +1,5 @@
+{
+  "$schema": "../schema/oc-port-agent.collection.schema.json",
+  "version": 1,
+  "policies": ["policies/retry.json", "policies/strip-bom.json", "policies/escape-regexp.json"]
+}

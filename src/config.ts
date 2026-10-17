@@ -41,6 +41,7 @@ export interface Config {
   reviewMetadataPaths: string[];
   baselineCommit?: string;
   configurationPath?: string;
+  protectedConfigPaths?: string[];
 }
 export interface State {
   version: 1;
@@ -219,7 +220,7 @@ export function skillEditPatterns(config: Config): string[] {
 }
 export function protectedEdit(path: string, config: Config): boolean {
   const internal = INTERNAL.filter(pattern => pattern !== '.opencode/**');
-  if (matchesAny(path, [...internal, ...SKILL_PROTECTED, ...config.protectedPaths]) || path === config.configurationPath) return true;
+  if (matchesAny(path, [...internal, ...SKILL_PROTECTED, ...config.protectedPaths]) || path === config.configurationPath || config.protectedConfigPaths?.includes(path)) return true;
   return matchesAny(path, ['.opencode/**']) && !matchesAny(path, skillEditPatterns(config));
 }
 export function checkpointPath(config: Config): string {

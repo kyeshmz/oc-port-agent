@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "oc-port-agent port collection",
+  "description": "Ordered upstream policies gathered into one target repository and one reviewed proposal.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "policies"],
+  "properties": {
+    "$schema": { "type": "string", "minLength": 1 },
+    "version": { "const": 1 },
+    "policies": {
+      "type": "array", "minItems": 1, "maxItems": 100, "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*[\\\\*?\\u0000-\\u001f])(?!(?:.*/)?\\.\\.?(?:/|$))[^/]+(?:/[^/]+)*$" },
+      "description": "Exact policy paths relative to the target repository root, not this collection file. Order determines adaptation order."
+    }
+  }
+}

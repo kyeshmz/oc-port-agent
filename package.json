@@ -12,7 +12,8 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js",
-    "test:public": "npm run build && node dist/examples/public-repositories.js"
+    "test:public": "npm run build && node dist/examples/public-repositories.js",
+    "test:collection": "npm run build && node dist/examples/collection-repositories.js"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

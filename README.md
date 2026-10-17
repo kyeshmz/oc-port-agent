@@ -4,7 +4,7 @@ Selectively adopt and keep upstream functionality aligned with a target reposito
 
 This is not a fork-merging bot or a language translator alone. Track a retry policy, API behavior, bug fix, tests, documentation, or configuration across repositories with different languages **or the same language and different architectures**. Describe what you want, which upstream paths are evidence, which target paths may change, and what must remain different.
 
-Status: an initial implementation with offline integration tests, a passing local Rust → TypeScript synchronization demo, and two passing pinned public-upstream adoption cases using the real OpenCode V2 CLI. The hosted model-powered sync has not yet been verified; the demo workflow is manual-only. These controlled tests are not a guarantee of correctness for arbitrary projects.
+Status: an initial implementation with offline integration tests, a passing local Rust → TypeScript synchronization demo, and two passing pinned public-upstream adoption cases using the real OpenCode V2 CLI, including a combined multi-repository collection run. The hosted model-powered sync has not yet been verified; the demo workflow is manual-only. These controlled tests are not a guarantee of correctness for arbitrary projects.
 
 A separate, experimental self-hosted [Cloudflare GitHub App backend](apps/cloudflare/README.md) is under development; it is not production-approved and does not replace this CLI.
 
@@ -110,6 +110,26 @@ Verification commands are trusted executable configuration, not model suggestion
 
 ### Multiple upstreams and skill maintenance
 
+To gather ports from several repositories into **one target and one proposal**, list their policies in a collection:
+
+```json
+{
+  "version": 1,
+  "policies": ["policies/retry.json", "policies/strip-bom.json"]
+}
+```
+
+Save this as `ports.json` in the target repository, then run:
+
+```sh
+oc-port-agent check --collection ports.json --full
+oc-port-agent sync --collection ports.json --full
+# After reviewing and merging the proposal, track subsequent changes:
+oc-port-agent sync --collection ports.json
+```
+
+Each policy declares its own upstream, selected functionality, target paths, verification, and baseline. Ports run in listed order in one proposal worktree, retaining separate source reports/checkpoints. All policies' checks run again against the combined target before publication; failures preserve the worktree without changing your checkout or publishing a partial proposal. Existing single-policy commands remain supported. See [the multi-repository guide](docs/multiple-repositories.md) for setup and the combined test harness.
+
 Use one policy per import and pass `--config <repository-relative.json>` to `check`, `baseline`, or `sync`. Each nondefault policy path uses its own tracked `.oc-port/checkpoints/<path-hash>.json`; legacy `oc-port-agent.json` retains `.oc-port/state.json` and its existing policy hash. Different repositories never share a checkpoint. The GitHub Action accepts the same path as its `config` input.
 
 For skill packs, explicitly set `allowSkillEdits` to exact IDs and select their `.opencode/skills/<id>/**` target paths. This does not authorize edits to agents, MCP/OpenCode config, nested registrations, or tool state, and the agent still cannot load skills or run shell/network tools. Host checks require explicit-invocation frontmatter and reject skill-tree symlinks. Unsupported or ambiguous metadata needs manual review, not a permissive fallback.
@@ -121,7 +141,7 @@ oc-port-agent check --config policies/playwright-cli.json
 oc-port-agent sync --config policies/playwright-cli.json
 ```
 
-These commands do not schedule themselves. A target workflow can serially check its policies and publish one verified draft proposal, waiting for review before the next. No automatic merging is added.
+These commands do not schedule themselves. A target workflow can use the Action's `collection` input to check all its policies or publish one combined verified draft proposal. Do not combine `collection` with `config`. No automatic merging is added.
 
 For an existing target that already corresponds to an upstream commit:
 
@@ -204,6 +224,7 @@ The [official OpenCode GitHub Action](https://github.com/anomalyco/opencode/blob
 | `mode` | `check`, `sync` (default), or `adopt` (`sync --full`). |
 | `publish` | Default `'false'`; enables draft PR publication only when explicitly `'true'`. |
 | `repository`, `base` | Required explicit target and base when publishing. |
+| `config`, `collection` | Optional repository-relative single policy or ordered multi-repository collection; mutually exclusive. |
 
 OpenCode is the default; no Anthropic key is required. The OpenCode example uses the currently available `opencode/gpt-6.1-sol` model. [The external-provider example](examples/github-workflow-external.yml) uses `OPENAI_API_KEY`; Anthropic and other providers work by selecting their recognized key variable and matching model. You can alternatively omit `api-key` and set the matching provider variable under `env`, just like the official action.
 

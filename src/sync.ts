@@ -1,11 +1,13 @@
 import { mkdtemp, mkdir, readFile, unlink, lstat, realpath, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { CONFIG, checkpointPath, protectedEdit, matchesAny, policyHash, type Config, type Verification } from './config.js';
 import { RESULT, invokeOpenCode, readReport, writePacket, type AgentReport } from './agent.js';
 import { clean, exists, jsonWrite, planSync, type Plan } from './upstream.js';
 import { git, run, type CommandResult } from './process.js';
 import { publicationGate, publish, type PublishOptions } from './github.js';
+import { planCollection } from './collection.js';
 
 export interface VerificationResult extends Verification { code: number; durationMs: number }
 export interface SyncOptions {
@@ -13,10 +15,19 @@ export interface SyncOptions {
   model?: string;
   publish?: PublishOptions;
   config?: string;
+  collection?: string;
   // Dependency injection for offline tests, not configurable through untrusted upstream.
   invoke?: (root: string, config: Config, packet: string, failure?: string) => Promise<void>;
 }
-export interface SyncResult { status: 'up-to-date' | 'proposal'; worktree?: string; branch?: string; report?: string; pr?: string }
+export interface SourceSyncResult {
+  config: string;
+  upstream: Config['upstream'];
+  from: string;
+  to: string;
+  status: 'up-to-date' | 'proposal';
+  report?: string;
+}
+export interface SyncResult { status: 'up-to-date' | 'proposal'; worktree?: string; branch?: string; report?: string; pr?: string; sources?: SourceSyncResult[] }
 
 export async function changedFiles(root: string): Promise<string[]> {
   const tracked = (await git(root, ['diff', '--no-ext-diff', '--no-textconv', '--name-only', '-z', 'HEAD'])).split('\0');
@@ -108,78 +119,132 @@ export function prBody(plan: Plan, report: AgentReport, paths: string[], verific
   return `## Summary\n\nAdapt selected upstream functionality (${plan.mode}) from \`${plan.from}\` to \`${plan.to}\`.\n\n${paths.length ? `${paths.length} target files changed.` : 'No target implementation changes; checkpoint/report only.'}\n\n## Decisions\n\n\`\`\`json\n${details}\n\`\`\`\n\n## Verification\n\n${verification.map(v => `- ${JSON.stringify([v.command, ...v.args]).replace(/`/g, '\\u0060')} — exit ${v.code}`).join('\n')}\n\nEvidence: \`${reportPath}\`. This draft requires human review; the checkpoint takes effect only when these changes merge.\n`;
 }
 
+type Source = Awaited<ReturnType<typeof planSync>>;
+
+async function applySource(worktree: string, { config, state, plan }: Source, invoke: SyncOptions['invoke']): Promise<{ reportPath: string; body: string }> {
+  const targetHead = (await git(worktree, ['rev-parse', 'HEAD'])).trim();
+  await skillGate(worktree, config);
+  const packet = await writePacket(worktree, config, plan);
+  const originalPacket = await readFile(packet, 'utf8');
+  let report: AgentReport = { summary: 'No selected upstream paths changed; all configured functionality remains outside this net diff.', decisions: [] };
+  let verification: VerificationResult[] = [];
+  let paths: string[] = [];
+  let failure: string | undefined;
+  let passed = false;
+  for (let attempt = 1; attempt <= config.opencode.maxAttempts; attempt++) {
+    if (plan.selections.length) {
+      if (await exists(join(worktree, RESULT))) await unlink(join(worktree, RESULT));
+      await (invoke ?? invokeOpenCode)(worktree, config, packet, failure);
+    }
+    // Hard gates are not retried; don't hide forbidden edits behind a later attempt.
+    paths = await editGate(worktree, config, plan, targetHead);
+    if (await readFile(packet, 'utf8') !== originalPacket) throw new Error('Upstream packet was modified by the agent');
+    try {
+      if (plan.selections.length) report = await readReport(worktree, plan);
+      assertDecisionEdits(report, paths, plan, config);
+    } catch (error) {
+      failure = (error as Error).message;
+      if (attempt === config.opencode.maxAttempts) throw error;
+      continue;
+    }
+    const checked = await verify(worktree, config);
+    verification = checked.results;
+    // Trusted verification must not introduce changes outside the allowed scope either.
+    paths = await editGate(worktree, config, plan, targetHead);
+    if (!checked.failure) { assertDecisionEdits(report, paths, plan, config); passed = true; break; }
+    failure = checked.failure;
+    if (!plan.selections.length) break;
+  }
+  if (!passed) throw new Error(`Verification failed; checkpoint not advanced. ${failure ?? ''}`);
+  const reportPath = `.oc-port/reports/${policyHash(config).slice(0, 12)}-${plan.mode}-${plan.to}.json`;
+  await mkdir(join(worktree, '.oc-port', 'reports'), { recursive: true });
+  await jsonWrite(join(worktree, reportPath), {
+    version: 1, upstream: config.upstream, configurationPath: config.configurationPath, mode: plan.mode,
+    from: plan.from, to: plan.to, targetBase: targetHead,
+    commits: plan.commits, changedUpstreamPaths: plan.changedPaths, changedTargetPaths: paths,
+    report, verification,
+    note: 'Agent decisions are claims for human review, not proof of behavioral equivalence. Checkpoint activates when this commit merges.',
+  });
+  // Only the host writes the next checkpoint, in the proposal branch (not the caller).
+  const checkpoint = checkpointPath(config);
+  await mkdir(dirname(join(worktree, checkpoint)), { recursive: true });
+  await jsonWrite(join(worktree, checkpoint), { ...state, lastSyncedCommit: plan.to });
+  await git(worktree, ['add', '--', ...paths, checkpoint, reportPath]);
+  const title = `${plan.mode === 'adopt' ? 'Adopt' : 'Sync'} upstream functionality ${plan.to.slice(0, 12)}`;
+  await git(worktree, ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'user.name=oc-port-agent', '-c', 'user.email=oc-port-agent@users.noreply.github.com', 'commit', '-m', title]);
+  return { reportPath, body: prBody(plan, report, paths, verification, reportPath) };
+}
+
 export async function synchronize(root: string, options: SyncOptions = {}): Promise<SyncResult> {
+  if (options.collection !== undefined && options.config !== undefined) throw new Error('--collection and --config cannot be combined');
   await clean(root);
-  const { config, state, plan } = await planSync(root, options.full, options.config);
+  const sources = options.collection !== undefined
+    ? (await planCollection(root, options.collection, options.full)).sources
+    : [await planSync(root, options.full, options.config)];
   if (options.model !== undefined) {
     if (!/^[^\s/]+\/[^\s]+$/.test(options.model)) throw new Error('--model must be provider/model, optionally followed by #variant');
-    config.opencode.model = options.model;
+    for (const source of sources) source.config.opencode.model = options.model;
   }
-  if (!options.full && plan.from === plan.to) return { status: 'up-to-date' };
-  if (config.selections.some(s => [s.description, ...s.acceptance].some(text => text.includes('EDIT ME:')))) throw new Error(`Replace the scaffold placeholders in ${CONFIG} before invoking OpenCode`);
+  const pending = sources.filter(({ plan }) => options.full || plan.from !== plan.to);
+  const results: SourceSyncResult[] = sources.map(({ config, plan }) => ({
+    config: config.configurationPath ?? CONFIG, upstream: config.upstream,
+    from: plan.from, to: plan.to, status: 'up-to-date',
+  }));
+  if (!pending.length) return { status: 'up-to-date', ...(options.collection !== undefined ? { sources: results } : {}) };
+  for (const { config } of pending) {
+    if (config.selections.some(s => [s.description, ...s.acceptance].some(text => text.includes('EDIT ME:')))) throw new Error(`Replace the scaffold placeholders in ${config.configurationPath ?? CONFIG} before invoking OpenCode`);
+  }
   const targetHead = (await git(root, ['rev-parse', 'HEAD'])).trim();
-  const namespace = `oc-port/${policyHash(config).slice(0, 12)}/`;
-  const branch = `${namespace}${plan.mode}-${plan.to.slice(0, 12)}-${targetHead.slice(0, 8)}`;
+  const first = pending[0]!;
+  const collectionHash = createHash('sha256').update(JSON.stringify({ file: options.collection, sources: sources.map(({ config, plan }) => ({ policy: policyHash(config), to: plan.to })) })).digest('hex').slice(0, 12);
+  const branch = options.collection !== undefined
+    ? `oc-port/collection-${collectionHash}/${first.plan.mode}-${targetHead.slice(0, 8)}`
+    : `oc-port/${policyHash(first.config).slice(0, 12)}/${first.plan.mode}-${first.plan.to.slice(0, 12)}-${targetHead.slice(0, 8)}`;
   if (options.publish) await publicationGate(root, options.publish, 'oc-port/');
   const parent = await mkdtemp(join(tmpdir(), 'oc-port-agent-'));
   const createdPath = join(parent, 'target');
   await git(root, ['-c', 'core.hooksPath=/dev/null', 'worktree', 'add', '-b', branch, createdPath, targetHead]);
   const worktree = await realpath(createdPath);
   try {
-    await skillGate(worktree, config);
-    const packet = await writePacket(worktree, config, plan);
-    const originalPacket = await readFile(packet, 'utf8');
-    let report: AgentReport = { summary: 'No selected upstream paths changed; all configured functionality remains outside this net diff.', decisions: [] };
-    let verification: VerificationResult[] = [];
-    let paths: string[] = [];
-    let failure: string | undefined;
-    let passed = false;
-    for (let attempt = 1; attempt <= config.opencode.maxAttempts; attempt++) {
-      if (plan.selections.length) {
-        if (await exists(join(worktree, RESULT))) await unlink(join(worktree, RESULT));
-        await (options.invoke ?? invokeOpenCode)(worktree, config, packet, failure);
-      }
-      // Hard gates are not retried; don't hide forbidden edits behind a later attempt.
-      paths = await editGate(worktree, config, plan, targetHead);
-      if (await readFile(packet, 'utf8') !== originalPacket) throw new Error('Upstream packet was modified by the agent');
-      try {
-        if (plan.selections.length) report = await readReport(worktree, plan);
-        assertDecisionEdits(report, paths, plan, config);
-      } catch (error) {
-        failure = (error as Error).message;
-        if (attempt === config.opencode.maxAttempts) throw error;
-        continue;
-      }
-      const checked = await verify(worktree, config);
-      verification = checked.results;
-      // Trusted verification must not introduce changes outside the allowed scope either.
-      paths = await editGate(worktree, config, plan, targetHead);
-      if (!checked.failure) { assertDecisionEdits(report, paths, plan, config); passed = true; break; }
-      failure = checked.failure;
-      if (!plan.selections.length) break;
+    let reportPath = '';
+    let body = '';
+    for (const source of pending) {
+      const applied = await applySource(worktree, source, options.invoke);
+      const result = results[sources.indexOf(source)]!;
+      result.status = 'proposal';
+      result.report = applied.reportPath;
+      reportPath = applied.reportPath;
+      body = applied.body;
     }
-    if (!passed) throw new Error(`Verification failed; checkpoint not advanced. ${failure ?? ''}`);
-    const reportPath = `.oc-port/reports/${policyHash(config).slice(0, 12)}-${plan.mode}-${plan.to}.json`;
-    await mkdir(join(worktree, '.oc-port', 'reports'), { recursive: true });
-    await jsonWrite(join(worktree, reportPath), {
-      version: 1, upstream: config.upstream, mode: plan.mode,
-      from: plan.from, to: plan.to, targetBase: targetHead,
-      commits: plan.commits, changedUpstreamPaths: plan.changedPaths, changedTargetPaths: paths,
-      report, verification,
-      note: 'Agent decisions are claims for human review, not proof of behavioral equivalence. Checkpoint activates when this commit merges.',
-    });
-    // Only the host writes the next checkpoint, in the proposal branch (not the caller).
-    const checkpoint = checkpointPath(config);
-    await mkdir(dirname(join(worktree, checkpoint)), { recursive: true });
-    await jsonWrite(join(worktree, checkpoint), { ...state, lastSyncedCommit: plan.to });
-    await git(worktree, ['add', '--', ...paths, checkpoint, reportPath]);
-    const title = `${plan.mode === 'adopt' ? 'Adopt' : 'Sync'} upstream functionality ${plan.to.slice(0, 12)}`;
-    await git(worktree, ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'user.name=oc-port-agent', '-c', 'user.email=oc-port-agent@users.noreply.github.com', 'commit', '-m', title]);
-    const result: SyncResult = { status: 'proposal', worktree, branch, report: reportPath };
+    const title = options.collection !== undefined
+      ? `${first.plan.mode === 'adopt' ? 'Adopt' : 'Sync'} functionality from ${pending.length} upstream policies`
+      : `${first.plan.mode === 'adopt' ? 'Adopt' : 'Sync'} upstream functionality ${first.plan.to.slice(0, 12)}`;
+    if (options.collection !== undefined) {
+      const combinedHead = (await git(worktree, ['rev-parse', 'HEAD'])).trim();
+      const verification: { config: string; results: VerificationResult[] }[] = [];
+      // A later port must not invalidate any earlier or unchanged source's checks.
+      for (const source of sources) {
+        await writePacket(worktree, source.config, source.plan);
+        const checked = await verify(worktree, source.config);
+        await editGate(worktree, source.config, { ...source.plan, selections: [] }, combinedHead);
+        if (checked.failure) throw new Error(`Combined verification failed for ${source.config.configurationPath}; no collection proposal published. ${checked.failure}`);
+        verification.push({ config: source.config.configurationPath!, results: checked.results });
+      }
+      reportPath = `.oc-port/reports/collection-${collectionHash}-${first.plan.mode}-${targetHead.slice(0, 8)}.json`;
+      await jsonWrite(join(worktree, reportPath), {
+        version: 1, collection: options.collection, targetBase: targetHead,
+        mode: first.plan.mode, sources: results, verification,
+        note: 'All sources verified together. Checkpoints activate only when the complete proposal merges.',
+      });
+      await git(worktree, ['add', '--', reportPath]);
+      await git(worktree, ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'user.name=oc-port-agent', '-c', 'user.email=oc-port-agent@users.noreply.github.com', 'commit', '-m', title]);
+      body = `## Summary\n\n${title}. All configured verification commands passed against the combined target.\n\n## Sources\n\n\`\`\`json\n${JSON.stringify(results, null, 2).replace(/`/g, '\\u0060')}\n\`\`\`\n\nEvidence: \`${reportPath}\`. Per-source reports contain decisions and checks. This draft requires human review; merge the complete proposal to activate its independent checkpoints.\n`;
+    }
+    const result: SyncResult = { status: 'proposal', worktree, branch, report: reportPath, ...(options.collection !== undefined ? { sources: results } : {}) };
     if (options.publish) {
       // Recheck after potentially lengthy inference to catch a newly merged base or concurrent sync PR.
       await publicationGate(root, options.publish, 'oc-port/');
-      result.pr = await publish(worktree, options.publish, branch, title, prBody(plan, report, paths, verification, reportPath));
+      result.pr = await publish(worktree, options.publish, branch, title, body);
     }
     return result;
   } catch (error) {
