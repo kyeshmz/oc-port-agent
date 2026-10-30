@@ -507,9 +507,10 @@ interface IntegrationFixture {
   now: { value: number };
 }
 
-async function makeFixture(behavior: 'adapt' | 'bad' | 'blocked'): Promise<IntegrationFixture> {
+async function makeFixture(behavior: 'adapt' | 'bad' | 'blocked', feedFetch: typeof fetch = async () => new Response(null, { status: 404 })): Promise<IntegrationFixture> {
   const migration = await readFile(new URL('../migrations/0001_initial.sql', import.meta.url), 'utf8');
-  const db = new SQLiteD1(migration);
+  const feedMigration = await readFile(new URL('../migrations/0002_upstream_feeds.sql', import.meta.url), 'utf8');
+  const db = new SQLiteD1(migration + '\n' + feedMigration);
   const registry = new D1RegistryStore(db, () => timestamp);
   const store = new IntegrationStore(registry);
   const github = new FixtureGitHub();
@@ -540,6 +541,7 @@ async function makeFixture(behavior: 'adapt' | 'bad' | 'blocked'): Promise<Integ
     async reconcileTracking(id) { await this.runTracking(id); },
   };
   const dependencies: WorkerDependencies = {
+    feedFetch,
     storeFor: () => registry,
     githubFor: () => github,
     queueFor: () => queue,
@@ -656,6 +658,59 @@ describe('offline hosted application integration', () => {
 
   afterEach(() => {
     for (const db of fixtures.splice(0)) db.database.close();
+  });
+
+  it('runs anonymous scheduled feed changes → durable outbox → queue → real portable core/verifier, without upstream installation or extra inference', async () => {
+    let feedVersion = 0;
+    const fixture = await makeFixture('adapt', async (url, init) => {
+      expect(new Headers(init?.headers).has('authorization')).toBe(false);
+      const etag = String(url).endsWith('/tags.atom') ? '"tags"' : `"branch-${feedVersion}"`;
+      if (new Headers(init?.headers).get('if-none-match') === etag) return new Response(null, { status: 304 });
+      return new Response(`<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>${etag}</id></entry></feed>`, {
+        headers: { 'content-type': 'application/atom+xml', etag },
+      });
+    });
+    fixtures.push(fixture.db);
+    fixture.github.head = baselineCommit;
+    const trackingId = await registerAndDispatch(fixture);
+    expect(fixture.agent.requests).toHaveLength(0);
+    expect(fixture.db.database.prepare('SELECT full_name FROM installation_repositories').all()).toEqual([{ full_name: repository.fullName.toLowerCase() }]);
+    const tick = async (expectedMessages: number) => {
+      fixture.now.value += 5 * 60_000;
+      const pending: Promise<unknown>[] = [];
+      fixture.worker.scheduled({ scheduledTime: fixture.now.value }, fixture.env, { waitUntil: task => pending.push(task) });
+      await Promise.all(pending);
+      expect(fixture.queue.messages).toHaveLength(expectedMessages);
+      while (fixture.queue.messages.length) {
+        const message = fixture.queue.messages.shift()!;
+        expect(message).toMatchObject({ kind: 'poll', trackingId, workId: expect.stringMatching(/^feed:/) });
+        expect(Object.keys(message).sort()).toEqual(['kind', 'trackingId', 'version', 'workId']);
+        expect(fixture.db.database.prepare('SELECT status FROM queue_outbox WHERE work_id = ?').get(message.workId)).toMatchObject({ status: 'sent' });
+        let acked = false;
+        await fixture.worker.queue({ messages: [{ body: message, ack: () => { acked = true; }, retry: () => { throw new Error('unexpected retry'); } }] }, fixture.env, { waitUntil: () => undefined });
+        expect(acked).toBe(true);
+      }
+    };
+    fixture.github.head = upstreamHead;
+    feedVersion++;
+    await tick(1);
+    expect(fixture.agent.requests).toHaveLength(1);
+    expect(fixture.runner.requestWorkspaces).toHaveLength(1);
+    expect(fixture.github.publications).toHaveLength(1);
+    expect((await fixture.store.getTrackingRegistration(trackingId))?.lastSyncedCommit).toBe(upstreamHead);
+    await tick(0); // 304 causes no queue work
+    feedVersion++;
+    await tick(1); // changed feed, authoritative head unchanged: no extra agent
+    fixture.github.head = 'f'.repeat(40);
+    fixture.github.changedPaths = ['README.md'];
+    feedVersion++;
+    await tick(1); // changed head, unselected diff: no extra agent
+    expect(fixture.agent.requests).toHaveLength(1);
+    expect(fixture.runner.requestWorkspaces).toHaveLength(1);
+    expect(fixture.github.publications).toHaveLength(1);
+    expect(await fixture.store.getTrackingRegistration(trackingId)).toMatchObject({
+      upstream: { ref: 'main', baselineCommit }, lastCheckedCommit: 'f'.repeat(40), lastSyncedCommit: upstreamHead,
+    });
   });
 
   it.each(['refs/heads/main', 'refs/tags/v1.0.0'])('runs signed %s → outbox → queue → portable core without cron, and skips paid inference for unchanged/unselected changes', async ref => {

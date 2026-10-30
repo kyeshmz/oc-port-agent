@@ -7,7 +7,7 @@ const secretValues = ['synthetic-console-key', 'synthetic-openai-key', 'syntheti
 
 function fixture() {
   const unused = vi.fn((): never => { throw new Error('Setup status must not access external dependencies'); });
-  const worker = createWorker({ storeFor: unused, githubFor: unused, queueFor: unused, targetJobsFor: unused });
+  const worker = createWorker({ feedFetch: unused, storeFor: unused, githubFor: unused, queueFor: unused, targetJobsFor: unused });
   const env: Env = {
     ADMIN_TOKEN: adminToken,
     GITHUB_APP_ID: '12345',

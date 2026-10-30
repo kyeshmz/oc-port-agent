@@ -9,6 +9,7 @@ import {
 } from './github.js';
 import { parsePolicy, policyHash } from './policy.js';
 import { hostedProviderStatus } from './provider.js';
+import { monitorUpstreamFeeds } from './upstream-feeds.js';
 import {
   D1RegistryStore,
   StoreError,
@@ -23,6 +24,7 @@ import {
   type UpstreamPushWebhookUpdate,
   type WebhookPayloadEvidence,
   type ConfirmedRegistrationRevision,
+  type UpstreamFeedStore,
 } from './store.js';
 import type {
   Env,
@@ -42,7 +44,7 @@ const MAX_LIFECYCLE_REGISTRATIONS = 50;
 const MAX_LIFECYCLE_RECONCILE_SECONDS = 25;
 const MAX_ACTIVE_REGISTRATION_SCAN = 5_000;
 
-interface ControlPlaneStore extends TrackingStorePort {
+interface ControlPlaneStore extends TrackingStorePort, UpstreamFeedStore {
   isTrackingEligible(trackingId: TrackingId): Promise<boolean>;
   applyInstallationWebhook(input: InstallationWebhookUpdate): Promise<boolean>;
   applyInstallationRepositoriesWebhook(input: InstallationRepositoriesWebhookUpdate): Promise<boolean>;
@@ -63,6 +65,7 @@ interface ControlPlaneStore extends TrackingStorePort {
 }
 
 export interface WorkerDependencies {
+  feedFetch: typeof fetch;
   storeFor(env: Env): ControlPlaneStore;
   githubFor(env: Env): RegistrationGitHubPort;
   queueFor(env: Env): { send(message: QueueWorkMessage): Promise<void> };
@@ -705,6 +708,8 @@ export async function runScheduler(env: Env, dependencies: WorkerDependencies): 
   const current = now();
   const timestamp = new Date(current).toISOString();
   await store.pruneExpiredRecords({ now: timestamp, limit: 500 });
+  try { await monitorUpstreamFeeds({ store, fetch: dependencies.feedFetch, now }); }
+  catch { /* Shared discovery failure must not stop fallback checks or outbox retry. */ }
   await store.enqueueDuePolls({
     now: timestamp,
     nextDueAt: new Date(current + FALLBACK_POLL_INTERVAL_MS).toISOString(),
@@ -749,6 +754,7 @@ export function createWorker(dependencies: WorkerDependencies) {
 }
 
 const defaultWorker = createWorker({
+  feedFetch: fetch,
   storeFor: env => new D1RegistryStore(env.DB),
   githubFor: env => new GitHubAppClient({ appId: env.GITHUB_APP_ID, privateKey: env.GITHUB_PRIVATE_KEY }),
   queueFor: env => env.JOB_QUEUE,

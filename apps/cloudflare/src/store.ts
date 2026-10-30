@@ -126,6 +126,36 @@ export interface QueueWorkMessage {
   trackingId: TrackingId;
 }
 
+export interface UpstreamFeedWatch {
+  id: number;
+  repository: string;
+  kind: 'branch' | 'tags';
+  ref: string;
+  etag: string | null;
+  lastModified: string | null;
+  bodyDigest: string | null;
+  failures: number;
+  leaseToken: string;
+}
+
+export type FeedObservation =
+  | { kind: 'snapshot'; digest: string; etag: string | null; lastModified: string | null }
+  | { kind: 'unchanged' }
+  | { kind: 'error' };
+
+export type UpstreamFeedStore = Pick<D1RegistryStore, 'claimDueUpstreamFeeds' | 'completeUpstreamFeed'>;
+
+// This join deliberately checks only downstream installation/access. Public
+// upstream owners do not need to install, authorize, or configure anything.
+const FEED_SUBSCRIBERS_SQL = `
+  SELECT t.tracking_id FROM tracking_registrations t
+  JOIN installations i ON i.installation_id = t.installation_id AND i.status = 'active'
+  JOIN installation_repositories r ON r.installation_id = t.installation_id
+    AND lower(r.full_name) = lower(t.target_full_name) AND r.active = 1
+  WHERE t.active = 1 AND lower(t.upstream_repository) = upstream_feed_watches.repository
+    AND (upstream_feed_watches.kind = 'tags' OR t.upstream_ref = upstream_feed_watches.ref)
+`;
+
 export class StoreError extends Error {
   readonly code: string;
 
@@ -308,6 +338,85 @@ function activeRegistrationRow(row: unknown): TrackingRegistration {
 
 export class D1RegistryStore implements TrackingStorePort {
   constructor(private readonly db: D1DatabaseBinding, private readonly now: () => string = () => new Date().toISOString()) {}
+
+  /** Discover existing registrations too; claim the oldest due shared watches atomically. */
+  async claimDueUpstreamFeeds(input: { now: string; leaseUntil: string; limit: number }): Promise<readonly UpstreamFeedWatch[]> {
+    if (!validTimestamp(input.now) || !validTimestamp(input.leaseUntil)
+      || Date.parse(input.leaseUntil) <= Date.parse(input.now)
+      || !Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 100) throw new StoreError('invalid-feed-claim');
+    const discover = (kind: 'branch' | 'tags') => this.db.prepare(`
+      INSERT INTO upstream_feed_watches (repository, kind, ref, next_due_at)
+      SELECT DISTINCT lower(t.upstream_repository), ?, ${kind === 'branch' ? 't.upstream_ref' : "''"}, ?
+      FROM tracking_registrations t
+      JOIN installations i ON i.installation_id = t.installation_id AND i.status = 'active'
+      JOIN installation_repositories r ON r.installation_id = t.installation_id
+        AND lower(r.full_name) = lower(t.target_full_name) AND r.active = 1
+      WHERE t.active = 1
+      ON CONFLICT (repository, kind, ref) DO NOTHING
+    `).bind(kind, input.now);
+    const token = crypto.randomUUID();
+    const claim = this.db.prepare(`
+      UPDATE upstream_feed_watches SET lease_token = ?, lease_until = ?
+      WHERE watch_id IN (
+        SELECT watch_id FROM upstream_feed_watches
+        WHERE next_due_at <= ? AND (lease_until IS NULL OR lease_until <= ?)
+          AND EXISTS (${FEED_SUBSCRIBERS_SQL})
+        ORDER BY next_due_at, watch_id LIMIT ?
+      ) RETURNING *
+    `).bind(token, input.leaseUntil, input.now, input.now, input.limit);
+    const results = await this.db.batch([discover('branch'), discover('tags'), claim]);
+    return (results[2]?.results ?? []).map(value => {
+      const row = value as Record<string, unknown>;
+      return {
+        id: row.watch_id as number, repository: row.repository as string, kind: row.kind as 'branch' | 'tags',
+        ref: row.ref as string, etag: row.etag as string | null, lastModified: row.last_modified as string | null,
+        bodyDigest: row.body_digest as string | null, failures: row.failures as number, leaseToken: token,
+      };
+    });
+  }
+
+  /** Snapshot and fan-out are one D1 transaction; no registration checkpoint or fallback time is changed. */
+  async completeUpstreamFeed(input: {
+    watch: UpstreamFeedWatch; observation: FeedObservation; now: string; nextDueAt: string;
+  }): Promise<boolean> {
+    const { watch, observation } = input;
+    if (!validTimestamp(input.now) || !validTimestamp(input.nextDueAt)
+      || (observation.kind === 'snapshot' && (!PAYLOAD_DIGEST.test(observation.digest)
+        || [observation.etag, observation.lastModified].some(value => value !== null && (value.length > 1_024 || /[\r\n]/.test(value)))))) {
+      throw new StoreError('invalid-feed-observation');
+    }
+    const snapshot = observation.kind === 'snapshot' ? observation : null;
+    const completionToken = crypto.randomUUID();
+    const update = this.db.prepare(`
+      UPDATE upstream_feed_watches SET
+        wake_revision = CASE WHEN ? IS NOT NULL AND body_digest IS NOT NULL AND body_digest != ? THEN revision + 1 ELSE NULL END,
+        body_digest = coalesce(?, body_digest),
+        etag = CASE WHEN ? = 1 THEN ? ELSE etag END,
+        last_modified = CASE WHEN ? = 1 THEN ? ELSE last_modified END,
+        failures = CASE WHEN ? = 1 THEN min(failures + 1, 20) ELSE 0 END,
+        next_due_at = ?, revision = revision + 1, observation_token = ?, lease_token = NULL, lease_until = NULL
+      WHERE watch_id = ? AND lease_token = ? AND lease_until > ?
+        AND EXISTS (${FEED_SUBSCRIBERS_SQL})
+      RETURNING watch_id
+    `).bind(snapshot?.digest ?? null, snapshot?.digest ?? null, snapshot?.digest ?? null,
+      snapshot ? 1 : 0, snapshot?.etag ?? null, snapshot ? 1 : 0, snapshot?.lastModified ?? null,
+      observation.kind === 'error' ? 1 : 0, input.nextDueAt, completionToken, watch.id, watch.leaseToken, input.now);
+    const enqueue = this.db.prepare(`
+      INSERT INTO queue_outbox (work_id, kind, tracking_id, created_at, status, attempts, next_attempt_at)
+      SELECT 'feed:' || w.watch_id || ':' || w.revision || ':' || t.tracking_id,
+        'poll', t.tracking_id, ?, 'pending', 0, ?
+      FROM upstream_feed_watches w
+      JOIN tracking_registrations t ON lower(t.upstream_repository) = w.repository
+        AND (w.kind = 'tags' OR t.upstream_ref = w.ref) AND t.active = 1
+      JOIN installations i ON i.installation_id = t.installation_id AND i.status = 'active'
+      JOIN installation_repositories r ON r.installation_id = t.installation_id
+        AND lower(r.full_name) = lower(t.target_full_name) AND r.active = 1
+      WHERE w.watch_id = ? AND w.observation_token = ? AND w.wake_revision = w.revision
+      ON CONFLICT (work_id) DO NOTHING
+    `).bind(input.now, input.now, watch.id, completionToken);
+    const results = await this.db.batch([update, enqueue]);
+    return rowCount(results[0]) === 1;
+  }
 
   async createTrackingRegistration(input: NewTrackingRegistration): Promise<TrackingRegistration> {
     const policy = parsePolicy(input.policy);

@@ -43,6 +43,7 @@ import {
   type WorkerDependencies,
 } from '../src/worker.js';
 import type { Env, QueueBatchBinding, QueueMessageBinding, TargetJobRpc } from '../src/env.js';
+import { monitorUpstreamFeeds } from '../src/upstream-feeds.js';
 
 const target: RepositoryIdentity = { owner: 'target-org', name: 'target', fullName: 'target-org/target' };
 const upstreamRepository = 'https://github.com/upstream-org/project.git';
@@ -51,6 +52,11 @@ const nowMs = Date.parse('2026-10-09T12:00:00.000Z');
 const nowIso = new Date(nowMs).toISOString();
 const adminToken = 'operator-secret-value-with-enough-entropy';
 const webhookSecret = 'local-webhook-secret';
+
+const atom = (value = 'initial') => `<?xml version="1.0" encoding="UTF-8"?><feed xmlns="http://www.w3.org/2005/Atom"><title>Tags</title><entry><id>${value}</id></entry></feed>`;
+const atomResponse = (value = 'initial', etag = '"initial"') => new Response(atom(value), {
+  headers: { 'content-type': 'application/atom+xml; charset=utf-8', etag, 'last-modified': 'Fri, 09 Oct 2026 12:00:00 GMT' },
+});
 
 function rawPolicy(): Record<string, unknown> {
   return {
@@ -72,6 +78,8 @@ function rawPolicy(): Record<string, unknown> {
 }
 
 class MemoryControlPlaneStore {
+  async claimDueUpstreamFeeds() { return []; }
+  async completeUpstreamFeed() { return false; }
   readonly registrations = new Map<string, TrackingRegistration>();
   readonly deliveries = new Map<string, { expiresAt: string; payloadClass: 'lifecycle' | 'event' }>();
   readonly outbox = new Map<string, QueueOutboxRecord & { status: 'pending' | 'sent'; createdAt: string; nextAttemptAt: string }>();
@@ -316,6 +324,7 @@ function setup() {
     ADMIN_TOKEN: adminToken,
   };
   const dependencies: WorkerDependencies = {
+    feedFetch: async () => { throw new Error('unexpected feed fetch'); },
     storeFor: () => store,
     githubFor: () => github,
     queueFor: () => queue,
@@ -809,6 +818,7 @@ class SQLiteD1 implements D1DatabaseBinding {
   constructor() {
     const migrationUrl = new URL('../migrations/0001_initial.sql', import.meta.url);
     this.database.exec(readFileSync(migrationUrl, 'utf8'));
+    this.database.exec(readFileSync(new URL('../migrations/0002_upstream_feeds.sql', import.meta.url), 'utf8'));
   }
 
   prepare(query: string): D1PreparedStatementBinding {
@@ -1082,6 +1092,7 @@ async function pushSetup() {
   };
   const clock = { now: nowMs };
   const dependencies: WorkerDependencies = {
+    feedFetch: async () => new Response(null, { status: 404 }),
     storeFor: () => store,
     githubFor: () => new FakeGitHub(),
     queueFor: () => queue,
@@ -1109,6 +1120,188 @@ const pushPoll = (trackingId: string) => ({
   workId: expect.stringMatching(new RegExp(`^hook_[a-f0-9]{64}:${trackingId}$`)),
   kind: 'poll',
   trackingId,
+});
+
+describe('shared anonymous upstream feed monitoring', () => {
+  async function fixture() {
+    const h = await pushSetup();
+    async function add(id: string, ref: string, installationId = 24, repository = upstreamRepository) {
+      const policy = parsePolicy({ ...rawPolicy(), upstream: { repository, ref } });
+      return h.store.createTrackingRegistration({
+        id, installationId, target: { owner: 'target-org', name: id, fullName: `target-org/${id}` }, baseBranch: 'main',
+        upstream: { repository, ref, baselineCommit: baseline }, policy, policyHash: await policyHash(policy), active: true,
+      });
+    }
+    const tick = async (fetcher: typeof fetch, advance = 5 * 60_000) => {
+      h.clock.now += advance;
+      await monitorUpstreamFeeds({ store: new D1RegistryStore(h.db), fetch: fetcher, now: () => h.clock.now });
+    };
+    const pending = () => h.store.listPendingOutbox({ now: new Date(h.clock.now).toISOString(), limit: 100 });
+    return { ...h, add, tick, pending };
+  }
+
+  it('discovers existing target-only installations, shares casefolded repos, preserves branch case, and fans tags across installations', async () => {
+    const h = await fixture();
+    await h.add('second', 'main', 24, 'https://github.com/Upstream-Org/Project.git');
+    await h.add('branch', 'Release/Next');
+    const requests: string[] = [];
+    await h.tick(async (url, init) => {
+      requests.push(String(url));
+      expect(init).toMatchObject({ redirect: 'error', credentials: 'omit' });
+      expect([...new Headers(init?.headers).keys()]).toEqual(['accept']);
+      return atomResponse();
+    }, 0);
+    expect(requests.sort()).toEqual([
+      'https://github.com/upstream-org/project/commits/Release%2FNext.atom',
+      'https://github.com/upstream-org/project/commits/main.atom',
+      'https://github.com/upstream-org/project/tags.atom',
+    ]);
+    expect(await h.pending()).toEqual([]); // first snapshot never suppresses the initial full check
+    expect(h.db.database.prepare('SELECT count(*) AS n FROM installation_repositories WHERE full_name = ?').get('upstream-org/project')).toMatchObject({ n: 0 });
+    const before = h.db.database.prepare('SELECT * FROM tracking_registrations ORDER BY tracking_id').all();
+    await h.tick(async (url, init) => {
+      expect(new Headers(init?.headers).get('if-none-match')).toBe('"initial"');
+      expect(new Headers(init?.headers).has('if-modified-since')).toBe(true);
+      return String(url).endsWith('/commits/main.atom') ? atomResponse('changed', 'W/"changed"') : new Response(null, { status: 304 });
+    });
+    expect((await h.pending()).map(row => row.trackingId).sort()).toEqual(['second', 'tracking_main']);
+    await h.tick(async url => String(url).endsWith('/tags.atom') ? atomResponse('new-tag') : new Response(null, { status: 304 }));
+    expect((await h.pending()).map(row => row.trackingId).sort()).toEqual(['branch', 'second', 'second', 'tracking_main', 'tracking_main']);
+    expect(h.db.database.prepare('SELECT * FROM tracking_registrations ORDER BY tracking_id').all()).toEqual(before);
+    expect(h.db.database.prepare('SELECT DISTINCT next_due_at FROM tracking_schedules').all()).toEqual([{ next_due_at: nowIso }]);
+    h.db.database.close();
+  });
+
+  it('persists conditional state across store instances; 304 and a new ETag with identical bytes do not wake anything', async () => {
+    const h = await fixture();
+    await h.tick(async () => atomResponse(), 0);
+    await h.tick(async () => new Response(null, { status: 304 }));
+    await h.tick(async () => atomResponse('initial', '"new-validator"'));
+    await h.tick(async (_url, init) => {
+      expect(new Headers(init?.headers).get('if-none-match')).toBe('"new-validator"');
+      return new Response(null, { status: 304 });
+    });
+    expect(await h.pending()).toEqual([]);
+    h.db.database.close();
+  });
+
+  it('bounds each due batch and advances oldest watches fairly rather than starving later repositories', async () => {
+    const h = await fixture();
+    for (let index = 0; index < 12; index++) await h.add(`target_${index}`, 'main', 24, `https://github.com/public/repository-${index}.git`);
+    const requested: string[] = [];
+    const fetcher: typeof fetch = async url => { requested.push(String(url)); return atomResponse(); };
+    await h.tick(fetcher, 0);
+    expect(requested).toHaveLength(20);
+    await h.tick(fetcher, 0);
+    expect(requested).toHaveLength(26);
+    expect(new Set(requested).size).toBe(26);
+    await h.tick(fetcher, 0);
+    expect(requested).toHaveLength(26);
+    h.db.database.close();
+  });
+
+  it('keeps known snapshots through errors, bounds backoff/Retry-After, and lets other watches proceed', async () => {
+    const h = await fixture();
+    await h.tick(async () => atomResponse(), 0);
+    const before = h.db.database.prepare('SELECT body_digest, etag FROM upstream_feed_watches ORDER BY watch_id').all();
+    const badResponses = [
+      () => new Response('<html>error</html>', { headers: { 'content-type': 'text/html' } }),
+      () => new Response('<feed xmlns="http://www.w3.org/2005/Atom"><entry>', { headers: { 'content-type': 'application/atom+xml' } }),
+      () => new Response(atom(), { headers: { 'content-type': 'application/atom+xml', 'content-length': '600000' } }),
+      () => new Response('x'.repeat(512 * 1024 + 1), { headers: { 'content-type': 'application/atom+xml' } }),
+      () => new Response('<!DOCTYPE feed [<!ENTITY x SYSTEM "file:///secret">]>' + atom(), { headers: { 'content-type': 'application/atom+xml' } }),
+      () => new Response(null, { status: 302, headers: { location: 'https://attacker.test' } }),
+      () => new Response(null, { status: 404 }),
+      () => { throw new Error('network unavailable'); },
+    ];
+    for (const response of badResponses) {
+      await h.tick(async url => String(url).endsWith('/tags.atom') ? new Response(null, { status: 304 }) : response(), 6 * 60 * 60_000);
+      expect(h.db.database.prepare('SELECT body_digest, etag FROM upstream_feed_watches ORDER BY watch_id').all()).toEqual(before);
+      expect(await h.pending()).toEqual([]);
+    }
+    await h.tick(async url => String(url).endsWith('/tags.atom') ? atomResponse('changed-tag') : new Response(null, { status: 429, headers: { 'retry-after': '999999999' } }), 6 * 60 * 60_000);
+    expect((await h.pending()).map(row => row.trackingId)).toEqual(['tracking_main']);
+    const branch = h.db.database.prepare("SELECT next_due_at FROM upstream_feed_watches WHERE kind = 'branch'").get() as { next_due_at: string };
+    expect(Date.parse(branch.next_due_at) - h.clock.now).toBe(6 * 60 * 60_000);
+    h.db.database.close();
+  });
+
+  it('expires stalled requests and continues fallback/outbox processing without any upstream credentials', async () => {
+    const h = await fixture();
+    vi.useFakeTimers();
+    try {
+      const run = runScheduler(h.env, { ...h.dependencies, feedFetch: async (_url, init) => {
+        expect(new Headers(init?.headers).has('authorization')).toBe(false);
+        return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener('abort', () => reject(new Error('aborted'))));
+      } });
+      await vi.advanceTimersByTimeAsync(10_001);
+      await run;
+      expect(h.queue.sent.map(message => message.trackingId)).toEqual(['tracking_main']);
+      expect(h.db.database.prepare('SELECT failures FROM upstream_feed_watches').all()).toEqual([{ failures: 1 }, { failures: 1 }]);
+    } finally { vi.useRealTimers(); h.db.database.close(); }
+  });
+
+  it('uses leases/CAS so concurrent claims, duplicate completions, and expired out-of-order responses cannot duplicate or overwrite', async () => {
+    const h = await fixture();
+    await h.tick(async () => atomResponse(), 0);
+    h.clock.now += 5 * 60_000;
+    const now = () => new Date(h.clock.now).toISOString();
+    const claim = () => h.store.claimDueUpstreamFeeds({ now: now(), leaseUntil: new Date(h.clock.now + 60_000).toISOString(), limit: 1 });
+    const first = (await claim())[0]!;
+    const parallel = (await claim())[0]!;
+    expect(parallel.id).not.toBe(first.id);
+    expect(await claim()).toEqual([]);
+    h.clock.now += 61_000;
+    const replacement = (await claim())[0]!;
+    expect(replacement.id).toBe(first.id);
+    const finish = (watch: typeof first, digest: string) => h.store.completeUpstreamFeed({
+      watch, observation: { kind: 'snapshot', digest, etag: '"changed"', lastModified: null },
+      now: now(), nextDueAt: new Date(h.clock.now + 300_000).toISOString(),
+    });
+    expect(await finish(replacement, 'b'.repeat(64))).toBe(true);
+    expect(await finish(first, 'c'.repeat(64))).toBe(false);
+    expect(await finish(replacement, 'b'.repeat(64))).toBe(false);
+    expect((await h.pending()).length).toBe(1);
+    expect(h.db.database.prepare('SELECT body_digest FROM upstream_feed_watches WHERE watch_id = ?').get(first.id)).toMatchObject({ body_digest: 'b'.repeat(64) });
+    h.db.database.close();
+  });
+
+  it('rechecks subscriber eligibility on completion and ignores inactive, suspended, removed-access and orphan watches', async () => {
+    const h = await fixture();
+    await h.add('second', 'main');
+    await h.tick(async () => atomResponse(), 0);
+    await h.tick(async () => {
+      h.db.database.prepare("UPDATE tracking_registrations SET active = 0 WHERE tracking_id = 'tracking_main'").run();
+      h.db.database.prepare('UPDATE installations SET status = ? WHERE installation_id = ?').run('suspended', 24);
+      return atomResponse('new');
+    });
+    expect(await h.pending()).toEqual([]);
+    const fetcher = vi.fn(async () => atomResponse('newer'));
+    await h.tick(fetcher);
+    expect(fetcher).not.toHaveBeenCalled();
+    h.db.database.prepare("UPDATE installations SET status = 'active' WHERE installation_id = 24").run();
+    h.db.database.prepare('UPDATE installation_repositories SET active = 0 WHERE installation_id = 24').run();
+    await h.tick(fetcher);
+    expect(fetcher).not.toHaveBeenCalled();
+    h.db.database.close();
+  });
+
+  it('keeps failed queue sends retryable through a fresh store and never postpones the daily fallback on feed activity', async () => {
+    const h = await fixture();
+    await h.tick(async () => atomResponse(), 0);
+    await h.tick(async () => atomResponse('changed'));
+    h.queue.fail = true;
+    expect(await flushQueueOutbox({ store: h.store, queue: h.queue, now: () => h.clock.now })).toEqual({ sent: 0, deferred: 2 });
+    h.clock.now += 31_000;
+    h.queue.fail = false;
+    expect(await flushQueueOutbox({ store: new D1RegistryStore(h.db), queue: h.queue, now: () => h.clock.now })).toEqual({ sent: 2, deferred: 0 });
+    await runScheduler(h.env, { ...h.dependencies, feedFetch: async () => new Response(null, { status: 304 }) });
+    expect(h.queue.sent.filter(message => message.workId.startsWith('poll:'))).toHaveLength(1);
+    h.clock.now += 24 * 60 * 60_000;
+    await runScheduler(h.env, { ...h.dependencies, feedFetch: async () => new Response(null, { status: 304 }) });
+    expect(h.queue.sent.filter(message => message.workId.startsWith('poll:'))).toHaveLength(2);
+    h.db.database.close();
+  });
 });
 
 describe('upstream push webhooks', () => {
