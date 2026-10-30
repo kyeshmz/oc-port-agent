@@ -8,6 +8,8 @@ import {
   type RegistrationGitHubPort,
 } from './github.js';
 import { parsePolicy, policyHash } from './policy.js';
+import { hostedProviderStatus } from './provider.js';
+import { monitorUpstreamFeeds } from './upstream-feeds.js';
 import {
   D1RegistryStore,
   StoreError,
@@ -22,6 +24,7 @@ import {
   type UpstreamPushWebhookUpdate,
   type WebhookPayloadEvidence,
   type ConfirmedRegistrationRevision,
+  type UpstreamFeedStore,
 } from './store.js';
 import type {
   Env,
@@ -41,7 +44,7 @@ const MAX_LIFECYCLE_REGISTRATIONS = 50;
 const MAX_LIFECYCLE_RECONCILE_SECONDS = 25;
 const MAX_ACTIVE_REGISTRATION_SCAN = 5_000;
 
-interface ControlPlaneStore extends TrackingStorePort {
+interface ControlPlaneStore extends TrackingStorePort, UpstreamFeedStore {
   isTrackingEligible(trackingId: TrackingId): Promise<boolean>;
   applyInstallationWebhook(input: InstallationWebhookUpdate): Promise<boolean>;
   applyInstallationRepositoriesWebhook(input: InstallationRepositoriesWebhookUpdate): Promise<boolean>;
@@ -62,6 +65,7 @@ interface ControlPlaneStore extends TrackingStorePort {
 }
 
 export interface WorkerDependencies {
+  feedFetch: typeof fetch;
   storeFor(env: Env): ControlPlaneStore;
   githubFor(env: Env): RegistrationGitHubPort;
   queueFor(env: Env): { send(message: QueueWorkMessage): Promise<void> };
@@ -413,17 +417,23 @@ async function handleVerifiedWebhook(request: Request, env: Env, dependencies: W
     return jsonResponse({ accepted, duplicate: !accepted }, 202);
   }
 
-  if (kind === 'push' && eventName === 'push' && typeof parsed.ref === 'string' && parsed.ref.startsWith('refs/heads/')
+  if (kind === 'push' && eventName === 'push' && typeof parsed.ref === 'string'
     && parsed.deleted !== true && isRecord(parsed.repository)) {
     const repositoryFullName = text(parsed.repository.full_name, 500, 'invalid-push-repository');
     if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repositoryFullName)) throw new HttpError(400, 'invalid-push-repository');
-    const upstreamRef = text(parsed.ref.slice('refs/heads/'.length), 255, 'invalid-push-ref');
-    if (!validBranch(upstreamRef)) throw new HttpError(400, 'invalid-push-ref');
+    const refMatch = parsed.ref.match(/^refs\/(heads|tags)\/(.+)$/);
+    if (!refMatch) throw new HttpError(400, 'invalid-push-ref');
+    const name = text(refMatch[2], 255, 'invalid-push-ref');
+    if (!validBranch(name) || name.split('/').some(part => part.startsWith('.') || part.endsWith('.lock'))) {
+      throw new HttpError(400, 'invalid-push-ref');
+    }
+    if (!validCommit(parsed.after) || /^0+$/.test(parsed.after)) throw new HttpError(400, 'invalid-push-after');
     const update: UpstreamPushWebhookUpdate = {
       delivery,
       evidence,
       upstreamRepository: `https://github.com/${repositoryFullName}.git`,
-      upstreamRef,
+      // Tags are wake-up hints only: the queued job still discovers the stored policy branch.
+      pushedRef: { kind: refMatch[1] === 'heads' ? 'branch' : 'tag', name },
       workPrefix: await hashWorkPrefix(installationId, delivery.deliveryId),
       nextDueAt: new Date(Date.parse(delivery.receivedAt) + FALLBACK_POLL_INTERVAL_MS).toISOString(),
     };
@@ -612,6 +622,17 @@ async function routeAdmin(
   pathname: string,
 ): Promise<Response> {
   if (!await isAdmin(request, env.ADMIN_TOKEN)) throw new HttpError(401, 'unauthorized');
+  if (request.method === 'GET' && pathname === '/admin/configuration') {
+    return jsonResponse({
+      provider: hostedProviderStatus(env),
+      github: {
+        credentialScope: 'service',
+        appId: /^\d{1,20}$/.test(env.GITHUB_APP_ID) ? env.GITHUB_APP_ID : null,
+        privateKeyConfigured: typeof env.GITHUB_PRIVATE_KEY === 'string' && env.GITHUB_PRIVATE_KEY.trim().length > 0,
+        webhookSecretConfigured: typeof env.GITHUB_WEBHOOK_SECRET === 'string' && env.GITHUB_WEBHOOK_SECRET.length > 0,
+      },
+    });
+  }
   if (request.method === 'POST' && pathname === '/admin/registrations') return createRegistration(request, env, dependencies);
   if (request.method === 'GET' && pathname === '/admin/registrations') return listRegistrations(env, dependencies);
   const match = pathname.match(/^\/admin\/registrations\/([^/]+)(?:\/(active|run))?$/);
@@ -687,6 +708,8 @@ export async function runScheduler(env: Env, dependencies: WorkerDependencies): 
   const current = now();
   const timestamp = new Date(current).toISOString();
   await store.pruneExpiredRecords({ now: timestamp, limit: 500 });
+  try { await monitorUpstreamFeeds({ store, fetch: dependencies.feedFetch, now }); }
+  catch { /* Shared discovery failure must not stop fallback checks or outbox retry. */ }
   await store.enqueueDuePolls({
     now: timestamp,
     nextDueAt: new Date(current + FALLBACK_POLL_INTERVAL_MS).toISOString(),
@@ -731,6 +754,7 @@ export function createWorker(dependencies: WorkerDependencies) {
 }
 
 const defaultWorker = createWorker({
+  feedFetch: fetch,
   storeFor: env => new D1RegistryStore(env.DB),
   githubFor: env => new GitHubAppClient({ appId: env.GITHUB_APP_ID, privateKey: env.GITHUB_PRIVATE_KEY }),
   queueFor: env => env.JOB_QUEUE,

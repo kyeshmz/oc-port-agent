@@ -6,6 +6,15 @@ export const OPENAI_BASE_URL = 'https://api.openai.com/v1' as const;
 
 export type HostedProviderMode = 'opencode' | 'openai';
 
+/** One operator-managed Worker binding set, shared by every registered target. */
+export interface HostedProviderEnvironment {
+  /** Missing selects OpenCode Console; invalid values never fall back. */
+  OPENCODE_PROVIDER?: string;
+  OPENCODE_MODEL?: string;
+  OPENCODE_API_KEY?: string;
+  OPENAI_API_KEY?: string;
+}
+
 interface HostedProviderBase {
   apiKey: string;
   model: string;
@@ -47,7 +56,7 @@ export class ProviderSelectionError extends Error {
 export interface ProviderSelectionInput {
   /** Missing means the trusted default, OpenCode Console. Empty/unknown values fail closed. */
   provider?: string;
-  model: string;
+  model?: string;
   opencodeApiKey?: string;
   openAiApiKey?: string;
 }
@@ -58,7 +67,8 @@ const MODEL_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
 const MAX_API_KEY_BYTES = 8_192;
 
 function validApiKey(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && value.length <= MAX_API_KEY_BYTES;
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_API_KEY_BYTES
+    && /^[\x21-\x7e]+$/.test(value);
 }
 
 function validModel(value: unknown): value is string {
@@ -102,6 +112,50 @@ export function resolveHostedProvider(input: ProviderSelectionInput): HostedProv
   }
 
   throw new ProviderSelectionError('agent-provider-invalid');
+}
+
+/** Resolve directly from service bindings, never from a registration or job record. */
+export function resolveHostedProviderEnvironment(env: HostedProviderEnvironment): HostedProviderSettings {
+  return resolveHostedProvider({
+    ...(env.OPENCODE_PROVIDER !== undefined ? { provider: env.OPENCODE_PROVIDER } : {}),
+    ...(env.OPENCODE_MODEL !== undefined ? { model: env.OPENCODE_MODEL } : {}),
+    ...(env.OPENCODE_API_KEY !== undefined ? { opencodeApiKey: env.OPENCODE_API_KEY } : {}),
+    ...(env.OPENAI_API_KEY !== undefined ? { openAiApiKey: env.OPENAI_API_KEY } : {}),
+  });
+}
+
+export interface HostedProviderStatus {
+  credentialScope: 'service';
+  provider: HostedProviderMode | null;
+  model?: string;
+  configured: boolean;
+  errorCode?: ProviderSelectionErrorCode;
+  requiredKey?: 'OPENCODE_API_KEY' | 'OPENAI_API_KEY';
+}
+
+/** Secret-free local readiness check; performs exactly the validation used by jobs. */
+export function hostedProviderStatus(env: HostedProviderEnvironment): HostedProviderStatus {
+  const selected = env.OPENCODE_PROVIDER ?? 'opencode';
+  const provider = selected === 'opencode' || selected === 'openai' ? selected : null;
+  const status: HostedProviderStatus = {
+    credentialScope: 'service',
+    provider,
+    ...(provider !== null && validModel(env.OPENCODE_MODEL) ? { model: env.OPENCODE_MODEL } : {}),
+    configured: false,
+  };
+  try {
+    resolveHostedProviderEnvironment(env);
+    return { ...status, configured: true };
+  } catch (error) {
+    if (!(error instanceof ProviderSelectionError)) throw error;
+    return {
+      ...status,
+      errorCode: error.code,
+      ...(error.code === 'agent-provider-credential-missing' && provider !== null
+        ? { requiredKey: provider === 'opencode' ? 'OPENCODE_API_KEY' : 'OPENAI_API_KEY' }
+        : {}),
+    };
+  }
 }
 
 /** Runtime validation prevents an untrusted or stale provider object from changing route details. */

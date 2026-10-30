@@ -26,8 +26,7 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
 	[Binding in keyof EnvType]: EnvType[Binding] extends string ? EnvType[Binding] : string;
 };
 declare namespace NodeJS {
-	// These Worker-only provider bindings are not required in sanitized child-process environments.
-	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "GITHUB_APP_ID" | "OPENCODE_MODEL" | "ADMIN_TOKEN" | "GITHUB_PRIVATE_KEY" | "GITHUB_WEBHOOK_SECRET">> {}
+	interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "GITHUB_APP_ID" | "OPENCODE_PROVIDER" | "OPENCODE_MODEL" | "ADMIN_TOKEN" | "GITHUB_PRIVATE_KEY" | "GITHUB_WEBHOOK_SECRET" | "OPENCODE_API_KEY">> {}
 }
 declare module "*.txt" {
 	const value: string;

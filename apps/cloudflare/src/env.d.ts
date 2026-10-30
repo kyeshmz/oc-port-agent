@@ -1,5 +1,6 @@
 import type { TrackingId } from './contracts.js';
 import type { D1DatabaseBinding, QueueWorkMessage } from './store.js';
+import type { HostedProviderEnvironment } from './provider.js';
 
 /** Identity-only work persisted to the D1 outbox before it is sent to Queues. */
 export interface TargetJobRpc {
@@ -15,7 +16,7 @@ export interface DurableObjectNamespaceBinding<T> {
   getByName(name: string): T;
 }
 
-export interface Env {
+export interface Env extends HostedProviderEnvironment {
   DB: D1DatabaseBinding;
   JOB_QUEUE: QueueBinding;
   TARGET_JOBS: DurableObjectNamespaceBinding<TargetJobRpc>;

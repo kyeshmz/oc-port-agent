@@ -294,7 +294,9 @@ class LocalNodeFixtureRunner implements RunnerPort {
               LC_ALL: 'C.UTF-8',
               OPENAI_API_KEY: '',
               OPENCODE_MODEL: '',
-              PATH: process.env.PATH ?? '/usr/bin:/bin',
+              OPENCODE_PROVIDER: '',
+              OPENCODE_API_KEY: '',
+              PATH: '/usr/bin:/bin',
               GIT_CONFIG_GLOBAL: '/dev/null',
               GIT_CONFIG_NOSYSTEM: '1',
               GIT_TERMINAL_PROMPT: '0',
@@ -388,21 +390,24 @@ class FixtureGitHub implements GitHubPort {
   publications: DraftPublication[] = [];
   readSourceCalls = 0;
   readVerificationCalls = 0;
+  changedPaths = ['src/strip-bom.js'];
+  readonly discoveredRefs: string[] = [];
 
   async verifyTrackingAccess() { return { targetAccessible: true, targetWritable: true, upstreamReadable: true }; }
   async verifyRegistrationReferences() {}
 
   async discoverPlan(registration: TrackingRegistration): Promise<import('../src/contracts.js').DiscoveredPlan | undefined> {
+    this.discoveredRefs.push(registration.upstream.ref);
     if (this.head === registration.lastSyncedCommit && this.head === registration.lastCheckedCommit) return undefined;
-    const changedFiles = [{ path: 'src/strip-bom.js', status: 'modified' as const }];
+    const changedFiles = this.changedPaths.map(path => ({ path, status: 'modified' as const }));
     return {
       trackingId: registration.id,
       installationId: registration.installationId,
       target: registration.target,
       baseBranch: registration.baseBranch,
       targetBaseCommit: this.currentBaseCommit,
-      upstreamRepository: upstreamRepository,
-      upstreamRef: 'main',
+      upstreamRepository: registration.upstream.repository,
+      upstreamRef: registration.upstream.ref,
       fromCommit: registration.lastSyncedCommit,
       expectedLastCheckedCommit: registration.lastCheckedCommit,
       toCommit: this.head,
@@ -502,9 +507,10 @@ interface IntegrationFixture {
   now: { value: number };
 }
 
-async function makeFixture(behavior: 'adapt' | 'bad' | 'blocked'): Promise<IntegrationFixture> {
+async function makeFixture(behavior: 'adapt' | 'bad' | 'blocked', feedFetch: typeof fetch = async () => new Response(null, { status: 404 })): Promise<IntegrationFixture> {
   const migration = await readFile(new URL('../migrations/0001_initial.sql', import.meta.url), 'utf8');
-  const db = new SQLiteD1(migration);
+  const feedMigration = await readFile(new URL('../migrations/0002_upstream_feeds.sql', import.meta.url), 'utf8');
+  const db = new SQLiteD1(migration + '\n' + feedMigration);
   const registry = new D1RegistryStore(db, () => timestamp);
   const store = new IntegrationStore(registry);
   const github = new FixtureGitHub();
@@ -535,6 +541,7 @@ async function makeFixture(behavior: 'adapt' | 'bad' | 'blocked'): Promise<Integ
     async reconcileTracking(id) { await this.runTracking(id); },
   };
   const dependencies: WorkerDependencies = {
+    feedFetch,
     storeFor: () => registry,
     githubFor: () => github,
     queueFor: () => queue,
@@ -554,7 +561,7 @@ async function makeFixture(behavior: 'adapt' | 'bad' | 'blocked'): Promise<Integ
   return { db, registry, store, github, agent, runner, queue, env, worker, rpc, now };
 }
 
-async function registerAndDispatch(fixture: IntegrationFixture): Promise<string> {
+async function registerAndDispatch(fixture: IntegrationFixture, webhookRef?: string): Promise<string> {
   const policy = rawPolicy();
   const request = new Request('https://offline-worker.test/admin/registrations', {
     method: 'POST',
@@ -570,6 +577,10 @@ async function registerAndDispatch(fixture: IntegrationFixture): Promise<string>
   const registered = await fixture.worker.fetch(request, fixture.env, { waitUntil: () => undefined });
   expect(registered.status).toBe(201);
   const body = await registered.json() as { registration: { id: string } };
+  if (webhookRef) {
+    await pushAndDispatch(fixture, webhookRef, 'initial-webhook');
+    return body.registration.id;
+  }
   const scheduled: Promise<unknown>[] = [];
   fixture.worker.scheduled({ scheduledTime: fixture.now.value }, fixture.env, { waitUntil: task => scheduled.push(task) });
   await Promise.all(scheduled);
@@ -581,6 +592,34 @@ async function registerAndDispatch(fixture: IntegrationFixture): Promise<string>
   await fixture.worker.queue(batch, fixture.env, { waitUntil: () => undefined });
   expect(ack.count).toBe(1);
   return body.registration.id;
+}
+
+async function pushAndDispatch(fixture: IntegrationFixture, ref: string, deliveryId: string): Promise<void> {
+  const payload = JSON.stringify({
+    ref, before: fixture.github.head, after: '9'.repeat(40), deleted: false,
+    installation: { id: 999 }, repository: { full_name: 'fixture-org/bom-upstream' },
+  });
+  const bytes = new TextEncoder().encode(payload);
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(fixture.env.GITHUB_WEBHOOK_SECRET),
+    { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const signature = await crypto.subtle.sign('HMAC', key, bytes);
+  const hex = [...new Uint8Array(signature)].map(byte => byte.toString(16).padStart(2, '0')).join('');
+  const response = await fixture.worker.fetch(new Request('https://offline-worker.test/webhooks/github', {
+    method: 'POST', body: payload,
+    headers: { 'x-github-event': 'push', 'x-github-delivery': deliveryId, 'x-hub-signature-256': `sha256=${hex}` },
+  }), fixture.env, { waitUntil: () => undefined });
+  expect(response.status).toBe(202);
+  expect(await response.json()).toEqual({ accepted: true, duplicate: false });
+  expect(fixture.queue.messages).toHaveLength(1);
+  const message = fixture.queue.messages.shift()!;
+  expect(message).toEqual({ version: 1, kind: 'poll', trackingId: expect.any(String), workId: expect.stringMatching(/^hook_/) });
+  const outbox = fixture.db.database.prepare('SELECT status FROM queue_outbox WHERE work_id = ?').get(message.workId);
+  expect(outbox).toMatchObject({ status: 'sent' });
+  let acknowledged = 0;
+  await fixture.worker.queue({ messages: [{
+    body: message, ack: () => { acknowledged++; }, retry: () => { throw new Error('unexpected webhook queue retry'); },
+  }] }, fixture.env, { waitUntil: () => undefined });
+  expect(acknowledged).toBe(1);
 }
 
 function baselineRunnerRequest(): RunnerRequest {
@@ -619,6 +658,92 @@ describe('offline hosted application integration', () => {
 
   afterEach(() => {
     for (const db of fixtures.splice(0)) db.database.close();
+  });
+
+  it('runs anonymous scheduled feed changes → durable outbox → queue → real portable core/verifier, without upstream installation or extra inference', async () => {
+    let feedVersion = 0;
+    const fixture = await makeFixture('adapt', async (url, init) => {
+      expect(new Headers(init?.headers).has('authorization')).toBe(false);
+      const etag = String(url).endsWith('/tags.atom') ? '"tags"' : `"branch-${feedVersion}"`;
+      if (new Headers(init?.headers).get('if-none-match') === etag) return new Response(null, { status: 304 });
+      return new Response(`<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>${etag}</id></entry></feed>`, {
+        headers: { 'content-type': 'application/atom+xml', etag },
+      });
+    });
+    fixtures.push(fixture.db);
+    fixture.github.head = baselineCommit;
+    const trackingId = await registerAndDispatch(fixture);
+    expect(fixture.agent.requests).toHaveLength(0);
+    expect(fixture.db.database.prepare('SELECT full_name FROM installation_repositories').all()).toEqual([{ full_name: repository.fullName.toLowerCase() }]);
+    const tick = async (expectedMessages: number) => {
+      fixture.now.value += 5 * 60_000;
+      const pending: Promise<unknown>[] = [];
+      fixture.worker.scheduled({ scheduledTime: fixture.now.value }, fixture.env, { waitUntil: task => pending.push(task) });
+      await Promise.all(pending);
+      expect(fixture.queue.messages).toHaveLength(expectedMessages);
+      while (fixture.queue.messages.length) {
+        const message = fixture.queue.messages.shift()!;
+        expect(message).toMatchObject({ kind: 'poll', trackingId, workId: expect.stringMatching(/^feed:/) });
+        expect(Object.keys(message).sort()).toEqual(['kind', 'trackingId', 'version', 'workId']);
+        expect(fixture.db.database.prepare('SELECT status FROM queue_outbox WHERE work_id = ?').get(message.workId)).toMatchObject({ status: 'sent' });
+        let acked = false;
+        await fixture.worker.queue({ messages: [{ body: message, ack: () => { acked = true; }, retry: () => { throw new Error('unexpected retry'); } }] }, fixture.env, { waitUntil: () => undefined });
+        expect(acked).toBe(true);
+      }
+    };
+    fixture.github.head = upstreamHead;
+    feedVersion++;
+    await tick(1);
+    expect(fixture.agent.requests).toHaveLength(1);
+    expect(fixture.runner.requestWorkspaces).toHaveLength(1);
+    expect(fixture.github.publications).toHaveLength(1);
+    expect((await fixture.store.getTrackingRegistration(trackingId))?.lastSyncedCommit).toBe(upstreamHead);
+    await tick(0); // 304 causes no queue work
+    feedVersion++;
+    await tick(1); // changed feed, authoritative head unchanged: no extra agent
+    fixture.github.head = 'f'.repeat(40);
+    fixture.github.changedPaths = ['README.md'];
+    feedVersion++;
+    await tick(1); // changed head, unselected diff: no extra agent
+    expect(fixture.agent.requests).toHaveLength(1);
+    expect(fixture.runner.requestWorkspaces).toHaveLength(1);
+    expect(fixture.github.publications).toHaveLength(1);
+    expect(await fixture.store.getTrackingRegistration(trackingId)).toMatchObject({
+      upstream: { ref: 'main', baselineCommit }, lastCheckedCommit: 'f'.repeat(40), lastSyncedCommit: upstreamHead,
+    });
+  });
+
+  it.each(['refs/heads/main', 'refs/tags/v1.0.0'])('runs signed %s → outbox → queue → portable core without cron, and skips paid inference for unchanged/unselected changes', async ref => {
+    const fixture = await makeFixture('adapt');
+    fixtures.push(fixture.db);
+    const trackingId = await registerAndDispatch(fixture, ref);
+    expect(fixture.agent.requests).toHaveLength(1);
+    expect(fixture.agent.requests[0]?.plan).toMatchObject({ upstreamRef: 'main', toCommit: upstreamHead });
+    expect(fixture.runner.requestWorkspaces).toHaveLength(1);
+    expect(fixture.github.publications).toHaveLength(1);
+    expect([...fixture.store.jobs.values()][0]?.status).toBe('merged');
+    expect(await fixture.store.getTrackingRegistration(trackingId)).toMatchObject({
+      installationId: 123,
+      upstream: { repository: upstreamRepository, ref: 'main', baselineCommit },
+      lastCheckedCommit: upstreamHead, lastSyncedCommit: upstreamHead,
+    });
+
+    // A fresh tag/body wakes the same stored branch, whose actual head has not moved.
+    await pushAndDispatch(fixture, 'refs/tags/v1.0.1', 'unchanged-head');
+    expect(fixture.agent.requests).toHaveLength(1);
+
+    fixture.github.head = 'f'.repeat(40);
+    fixture.github.changedPaths = ['README.md'];
+    await pushAndDispatch(fixture, 'refs/heads/main', 'unselected-path-change');
+    expect(await fixture.store.getTrackingRegistration(trackingId)).toMatchObject({
+      lastCheckedCommit: 'f'.repeat(40), lastSyncedCommit: upstreamHead,
+    });
+    expect(fixture.agent.requests).toHaveLength(1);
+    expect(fixture.github.readSourceCalls).toBe(1);
+    expect(fixture.runner.requestWorkspaces).toHaveLength(1);
+    expect(fixture.github.publications).toHaveLength(1);
+    expect(fixture.github.discoveredRefs).toEqual(['main', 'main', 'main']);
+    expect(fixture.db.database.prepare('SELECT work_id FROM queue_outbox').all()).toHaveLength(3);
   });
 
   it('fails the BOM oracle first, registers through cron/outbox/queue, verifies the complete fixture, publishes, merges, then no-ops', async () => {

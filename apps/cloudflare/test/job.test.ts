@@ -28,17 +28,24 @@ import {
   TargetJobError,
   jobInstanceName,
   markInterruptedJobFailed,
-  providerForTargetJobEnvironment,
   type DurableJobSqlPort,
+  type TargetJobEnvironment,
 } from '../src/job.js';
+import { resolveHostedProviderEnvironment } from '../src/provider.js';
+import { createOpenCodeAgent } from '../src/opencode.js';
 import { activateConfirmedCheckpoint } from '../src/core.js';
 import { runJob } from '../src/core.js';
 import { DEFAULT_LIMITS, parsePolicy, policyHash } from '../src/policy.js';
 
 vi.mock('cloudflare:workers', () => ({
   DurableObject: class DurableObject {
-    constructor(_ctx: unknown, _env: unknown) {}
+    constructor(ctx: unknown, env: unknown) { Object.assign(this, { ctx, env }); }
   },
+}));
+
+vi.mock('../src/opencode.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../src/opencode.js')>(),
+  createOpenCodeAgent: vi.fn(),
 }));
 
 const timestamp = '2026-10-09T12:00:00.000Z';
@@ -660,7 +667,7 @@ describe('target job durable storage and routing', () => {
   });
 
   it('pairs the trusted provider selection with only its own key and never falls back', () => {
-    const consoleProvider = providerForTargetJobEnvironment({
+    const consoleProvider = resolveHostedProviderEnvironment({
       OPENCODE_PROVIDER: 'opencode',
       OPENCODE_API_KEY: 'synthetic-console-key',
       OPENAI_API_KEY: 'synthetic-openai-key',
@@ -675,14 +682,14 @@ describe('target job durable storage and routing', () => {
       baseURL: 'https://opencode.ai/zen/v1',
     });
 
-    expect(() => providerForTargetJobEnvironment({
+    expect(() => resolveHostedProviderEnvironment({
       OPENCODE_PROVIDER: 'opencode',
       OPENCODE_API_KEY: '',
       OPENAI_API_KEY: 'synthetic-openai-key',
       OPENCODE_MODEL: 'gpt-6-luna',
     })).toThrowError('agent-provider-credential-missing');
 
-    const legacyProvider = providerForTargetJobEnvironment({
+    const legacyProvider = resolveHostedProviderEnvironment({
       OPENCODE_PROVIDER: 'openai',
       OPENCODE_API_KEY: 'synthetic-console-key',
       OPENAI_API_KEY: 'synthetic-openai-key',
@@ -696,6 +703,71 @@ describe('target job durable storage and routing', () => {
       protocol: 'chat-completions',
       baseURL: 'https://api.openai.com/v1',
     });
+  });
+
+  it('creates different target hosts from the same service bindings and consumes rotated bindings on replacement', async () => {
+    const factory = vi.mocked(createOpenCodeAgent);
+    factory.mockResolvedValue({ close: async () => {} } as Awaited<ReturnType<typeof createOpenCodeAgent>>);
+    const serviceBindings = {
+      OPENCODE_PROVIDER: 'opencode', OPENCODE_MODEL: 'gpt-6-luna',
+      OPENCODE_API_KEY: 'synthetic-service-key', OPENAI_API_KEY: 'synthetic-unused-key',
+      GITHUB_APP_ID: '8', GITHUB_PRIVATE_KEY: 'synthetic-private-key',
+      DB: {}, SANDBOX: {},
+    } as TargetJobEnvironment;
+    const records = [registration(), registration({
+      id: 'tracking-2', target: { owner: 'org', name: 'second', fullName: 'org/second' },
+    })];
+    const before = JSON.stringify(records);
+    const databases: DatabaseSync[] = [];
+    const startHost = async (record: TrackingRegistration, env: TargetJobEnvironment) => {
+      const database = new DatabaseSync(':memory:');
+      databases.push(database);
+      let initialization: Promise<void> | undefined;
+      const context = {
+        storage: new NativeDurableStorage(database),
+        blockConcurrencyWhile(callback: () => Promise<void>) { initialization = callback(); return initialization; },
+      } as unknown as ConstructorParameters<typeof TargetJobDO>[0];
+      new TargetJobDO(context, env);
+      await initialization;
+      const durable = new DurableSqliteJobStore(context.storage);
+      durable.bindTargetIdentity(await jobInstanceName(record));
+    };
+    try {
+      expect(await jobInstanceName(records[0]!)).not.toBe(await jobInstanceName(records[1]!));
+      await startHost(records[0]!, { ...serviceBindings });
+      await startHost(records[1]!, { ...serviceBindings });
+      await startHost(records[0]!, { ...serviceBindings, OPENCODE_API_KEY: 'synthetic-rotated-key' });
+      expect(factory.mock.calls.map(([options]) => options.provider)).toEqual([
+        expect.objectContaining({ provider: 'opencode', apiKey: 'synthetic-service-key', model: 'gpt-6-luna' }),
+        expect.objectContaining({ provider: 'opencode', apiKey: 'synthetic-service-key', model: 'gpt-6-luna' }),
+        expect.objectContaining({ provider: 'opencode', apiKey: 'synthetic-rotated-key', model: 'gpt-6-luna' }),
+      ]);
+      expect(JSON.stringify(records)).toBe(before);
+      for (const database of databases) {
+        const dump = JSON.stringify(database.prepare('SELECT * FROM ocpa_job_target_identity').all());
+        expect(dump).not.toContain('synthetic-');
+        expect(database.prepare('SELECT COUNT(*) AS count FROM ocpa_job_records').get()).toEqual({ count: 0 });
+      }
+    } finally {
+      factory.mockReset();
+      databases.forEach(database => database.close());
+    }
+  });
+
+  it('rejects invalid selected credentials before creating production target dependencies without fallback', async () => {
+    const factory = vi.mocked(createOpenCodeAgent);
+    for (const key of [undefined, '', ' ', 'synthetic key', 'synthetic\nkey', 'synthetic\u007fkey']) {
+      const instance = Object.create(TargetJobDO.prototype) as TargetJobDO;
+      Reflect.set(instance, 'ctx', { storage: {} });
+      Reflect.set(instance, 'env', {
+        OPENCODE_PROVIDER: 'openai', OPENCODE_MODEL: 'gpt-4.1-mini',
+        OPENCODE_API_KEY: 'synthetic-unselected-key', OPENAI_API_KEY: key,
+      });
+      const createHost: unknown = Reflect.get(TargetJobDO.prototype, 'createAgentHost');
+      if (typeof createHost !== 'function') throw new Error('missing production host factory');
+      await expect(Reflect.apply(createHost, instance, [])).rejects.toThrow('agent-provider-credential-missing');
+    }
+    expect(factory).not.toHaveBeenCalled();
   });
 
   it('creates one durable job by deterministic key and rejects conflicting IDs', async () => {
