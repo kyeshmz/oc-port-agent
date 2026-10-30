@@ -4,6 +4,11 @@ This is a separate, self-hosted backend package. It does not replace the root
 CLI and does not provide a multi-user OAuth dashboard. An authenticated
 operator approves each target repository, policy, and verification command.
 
+One hosted service supplies the model and GitHub App credentials for **all of its
+registered repositories**. Install the App on your GitHub account, select the
+repositories it may access, and register their tracking policies. Adding another
+repository does not require another provider key or repository secret.
+
 ## Release status
 
 **Not production-approved. Do not deploy this package for unattended use yet.**
@@ -47,7 +52,7 @@ behavior.
 ## Prerequisites and operator decisions
 
 - Node.js `^22.12.0`, `^24.0.0`, or `>=26.0.0` and npm. The tested local Node
-  release is 22.21.0. Vitest 5 requires these supported Node ranges.
+  release is 22.23.3. Vitest 5 requires these supported Node ranges.
 - Docker Desktop only for optional local custom-image work or Container
   emulation. The dedicated Worker config uses the pinned public Sandbox image,
   so its no-local-Docker deployment path does not build a local image. Cloudflare
@@ -123,22 +128,70 @@ and webhook secret only through a secret manager. Install the App on the target
 repository. A private upstream also needs read access through that installation;
 a public upstream does not require installation membership.
 
-Push events are the primary sync trigger. Also install the App on the upstream
-repositories you control so their pushes reach the Worker. A push to a branch
-queues a poll for every active registration that tracks that upstream
-repository and branch, so those registrations sync within seconds. The poll
-reads the upstream from the stored policy, not from the push payload. The push
-may come from a different installation than the target's. Tag pushes and branch
-deletions are recorded and ignored.
+### Event-driven updates
 
-Upstreams without the App, such as third-party repositories, fall back to a
-daily poll. That poll needs a Worker cron trigger, for example
+GitHub **Push** webhooks are the primary sync trigger. Install the App on the
+upstream repositories you control as well as the target repositories. The same
+Push subscription covers branch and tag pushes; no additional provider key or
+per-repository Actions workflow is needed.
+
+| Event | Work scheduled |
+| --- | --- |
+| Push to a tracked branch | Check active registrations matching that upstream repository and branch |
+| Tag created or updated by a push | Check every active registration for that upstream repository, using each registration's configured branch |
+| Branch or tag deletion | No adaptation work |
+| A tracked proposal PR merges | Reconcile its checkpoint against GitHub's current state |
+
+The Worker verifies the exact webhook body, records replay protection and a
+durable outbox entry, then sends identity-only work to the target queue. This
+immediately flushes up to 100 pending outbox records without a scheduler tick;
+larger backlogs and failed sends need the configured cron below. The internal
+queue kind `poll` means a single upstream check; it does not mean that the
+webhook starts a polling loop. An upstream event may come from a different App
+installation than the target's.
+
+Each check reads the repository and branch from the stored policy and obtains
+the authoritative commit/diff from GitHub. A tag is a wake-up signal: it does
+not replace the tracked branch or make the payload's SHA a trusted checkpoint.
+Tag-pinned or latest-release-only adoption is a separate policy capability.
+Unchanged heads and changes outside the selected upstream paths do not invoke
+the model. Selected paths determine whether model work is needed; acceptance
+criteria guide adaptation and verification. This does not classify semantic
+breaking changes automatically.
+
+Upstreams without the App, such as third-party repositories, need an owner to
+install the App or forward notifications; installation on your downstream repo
+alone cannot receive their pushes. A daily fallback check also covers missed
+events, including GitHub's documented limits on bulk tag pushes and oversized
+webhook payloads. See the [Push event contract](https://docs.github.com/en/webhooks/webhook-events-and-payloads#push).
+That fallback needs a Worker cron trigger, for example
 `"triggers": { "crons": ["17 * * * *"] }`. The hourly tick only enqueues
 registrations whose daily poll is due, and a push postpones the next fallback
-poll by a day. Cron stays disabled in the checked-in config until
+poll by a day. It also retries pending queue-outbox deliveries after temporary
+queue failures. Cron stays disabled in the checked-in config until
 registration/run checks are approved.
 
-## Configure local and remote secrets
+## Configure shared credentials once
+
+Credentials belong to the hosted Worker environment. The provider module is the
+single source of provider/model/key selection for target jobs and the setup-status
+endpoint. Registrations contain repository identities, a branch, a baseline and a
+policy; they do not accept or store provider credentials. All target Durable
+Objects use the same service bindings, so adding repositories or updating their
+policies does not copy keys.
+
+For one GitHub account:
+
+1. Configure the GitHub App ID, private key and webhook secret on one Worker.
+2. Configure the selected model provider and its API key on that Worker once.
+3. Install the App on the account and select the repositories it may cover.
+4. Register each target with that installation ID and its reviewed tracking
+   policy. Add further repositories to the installation as needed.
+
+The service obtains GitHub installation tokens with the App credential; target
+repositories need neither individual provider secrets nor individual publishing
+tokens. Rotating a service secret updates subsequent jobs through the Worker
+environment, with no registration changes.
 
 `wrangler.jsonc` lists the required secrets but contains no secret values. The
 trusted `OPENCODE_PROVIDER` variable defaults to `opencode`, and
@@ -172,6 +225,23 @@ generic OpenAI credential is required for the default Console configuration.
 Provider credentials, model compatibility, quotas, and spending limits still
 require operator approval. Configuration and offline tests do not prove that a
 real provider call has succeeded.
+
+After configuring the service, inspect its secret-free setup status:
+
+```sh
+curl --fail-with-body \
+  --header "Authorization: Bearer ${ADMIN_TOKEN}" \
+  "${WORKER_URL}/admin/configuration"
+```
+
+This authenticated endpoint reports the shared provider configuration and GitHub
+credential presence, without exposing secret values or making provider calls.
+It checks local configuration, not remote API-key validity or webhook delivery.
+`provider.credentialScope` is `service`; `provider.configured` indicates that the
+selected provider, model and key pass the job runner's configuration validation.
+An incomplete provider reports a stable `errorCode` and, when applicable,
+`requiredKey`. `github` reports the App ID and presence flags for the shared
+private key and webhook secret. Adding a repository does not change this status.
 
 After the release gates and human approval are complete, the operator's remote
 sequence is:
@@ -214,6 +284,22 @@ workspace. `test:runtime` separately checks a real Workerd `TargetJobDO`, SDK
 session create/get, and app job storage across eviction. It uses synthetic
 bindings and makes no provider, GitHub, or Container request. Neither suite
 proves Linux isolation or a deployed Container.
+
+Local verification on 2026-10-30 (Node 22.23.3, pinned dependencies):
+
+- Generated Wrangler types and app typecheck passed.
+- The full hosted suite passed **203 tests across 12 files**, including signed
+  branch/tag webhook dispatch without cron and model-free unchanged/unselected
+  follow-ups.
+- The explicit Workerd smoke passed **2 tests**, including real SDK session and
+  app job recovery after Durable Object eviction.
+- The Worker-only dry run passed at **22,827.49 KiB / 3,970.65 KiB gzip**.
+
+The Workerd test preloads the real SDK before constructing the Durable Object.
+Vite resolves dynamic imports over RPC; doing that while the startup input gate
+is held stalled the test at the existing 20-second initialization bound. The
+same failure reproduced on baseline `02acab4`. Preloading fixes the test harness
+without changing production initialization, timeouts, or persistence assertions.
 
 The route-chain integration fakes model output and publisher/API boundaries; it
 does not make a paid model call. Assertions cover the initial BOM test failure,
@@ -320,6 +406,8 @@ the target's real paths/tests.
 
 Authenticated routes:
 
+- `GET /admin/configuration` — inspect the shared credential configuration without
+  returning secrets or contacting providers.
 - `POST /admin/registrations` — validate installation access and store the
   approved policy/baseline.
 - `GET /admin/registrations` — list the current operator's registrations.
@@ -327,7 +415,7 @@ Authenticated routes:
 - `POST /admin/registrations/<id>/active` — activate/deactivate with the
   current `expectedRevision`.
 
-All require `Authorization: Bearer <ADMIN_TOKEN>`. The exact response exposes
+All require `Authorization: Bearer <ADMIN_TOKEN>`. Registration responses expose
 the generated tracking ID, revision, and separate checked/synced commit values.
 The baseline is an operator assertion, not a parity test. Review the first
 draft PR. The checkpoint advances only after confirmed merge state on the

@@ -8,6 +8,7 @@ import {
   type RegistrationGitHubPort,
 } from './github.js';
 import { parsePolicy, policyHash } from './policy.js';
+import { hostedProviderStatus } from './provider.js';
 import {
   D1RegistryStore,
   StoreError,
@@ -413,17 +414,23 @@ async function handleVerifiedWebhook(request: Request, env: Env, dependencies: W
     return jsonResponse({ accepted, duplicate: !accepted }, 202);
   }
 
-  if (kind === 'push' && eventName === 'push' && typeof parsed.ref === 'string' && parsed.ref.startsWith('refs/heads/')
+  if (kind === 'push' && eventName === 'push' && typeof parsed.ref === 'string'
     && parsed.deleted !== true && isRecord(parsed.repository)) {
     const repositoryFullName = text(parsed.repository.full_name, 500, 'invalid-push-repository');
     if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repositoryFullName)) throw new HttpError(400, 'invalid-push-repository');
-    const upstreamRef = text(parsed.ref.slice('refs/heads/'.length), 255, 'invalid-push-ref');
-    if (!validBranch(upstreamRef)) throw new HttpError(400, 'invalid-push-ref');
+    const refMatch = parsed.ref.match(/^refs\/(heads|tags)\/(.+)$/);
+    if (!refMatch) throw new HttpError(400, 'invalid-push-ref');
+    const name = text(refMatch[2], 255, 'invalid-push-ref');
+    if (!validBranch(name) || name.split('/').some(part => part.startsWith('.') || part.endsWith('.lock'))) {
+      throw new HttpError(400, 'invalid-push-ref');
+    }
+    if (!validCommit(parsed.after) || /^0+$/.test(parsed.after)) throw new HttpError(400, 'invalid-push-after');
     const update: UpstreamPushWebhookUpdate = {
       delivery,
       evidence,
       upstreamRepository: `https://github.com/${repositoryFullName}.git`,
-      upstreamRef,
+      // Tags are wake-up hints only: the queued job still discovers the stored policy branch.
+      pushedRef: { kind: refMatch[1] === 'heads' ? 'branch' : 'tag', name },
       workPrefix: await hashWorkPrefix(installationId, delivery.deliveryId),
       nextDueAt: new Date(Date.parse(delivery.receivedAt) + FALLBACK_POLL_INTERVAL_MS).toISOString(),
     };
@@ -612,6 +619,17 @@ async function routeAdmin(
   pathname: string,
 ): Promise<Response> {
   if (!await isAdmin(request, env.ADMIN_TOKEN)) throw new HttpError(401, 'unauthorized');
+  if (request.method === 'GET' && pathname === '/admin/configuration') {
+    return jsonResponse({
+      provider: hostedProviderStatus(env),
+      github: {
+        credentialScope: 'service',
+        appId: /^\d{1,20}$/.test(env.GITHUB_APP_ID) ? env.GITHUB_APP_ID : null,
+        privateKeyConfigured: typeof env.GITHUB_PRIVATE_KEY === 'string' && env.GITHUB_PRIVATE_KEY.trim().length > 0,
+        webhookSecretConfigured: typeof env.GITHUB_WEBHOOK_SECRET === 'string' && env.GITHUB_WEBHOOK_SECRET.length > 0,
+      },
+    });
+  }
   if (request.method === 'POST' && pathname === '/admin/registrations') return createRegistration(request, env, dependencies);
   if (request.method === 'GET' && pathname === '/admin/registrations') return listRegistrations(env, dependencies);
   const match = pathname.match(/^\/admin\/registrations\/([^/]+)(?:\/(active|run))?$/);

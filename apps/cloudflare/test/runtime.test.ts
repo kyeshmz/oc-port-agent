@@ -1,4 +1,7 @@
 import { exports, env } from 'cloudflare:workers';
+// Vite loads modules over RPC. Preload the real SDK before a DO's startup input
+// gate blocks events, otherwise the adapter's dynamic import cannot complete.
+import '@opencode/sdk/workerd';
 import { evictDurableObject, runInDurableObject } from 'cloudflare:test';
 import { describe, expect, it } from 'vitest';
 import { DurableSqliteJobStore } from '../src/job.js';

@@ -29,7 +29,7 @@ import {
 import { createSandboxRunner, type SandboxNamespace } from './sandbox.js';
 import { parsePolicy } from './policy.js';
 import type { OpenCodeWorkerd } from '@opencode/sdk/workerd';
-import { resolveHostedProvider, type HostedProviderSettings } from './provider.js';
+import { resolveHostedProviderEnvironment, type HostedProviderEnvironment } from './provider.js';
 
 const JOB_TABLE = 'ocpa_job_records';
 const EFFECT_TABLE = 'ocpa_job_publication_effects';
@@ -72,30 +72,11 @@ function isJobStage(value: unknown): value is JobStage {
   return typeof value === 'string' && ALL_STAGES.some(stage => stage === value);
 }
 
-export interface TargetJobEnvironment {
+export interface TargetJobEnvironment extends HostedProviderEnvironment {
   DB: D1DatabaseBinding;
   GITHUB_APP_ID: string;
   GITHUB_PRIVATE_KEY: string;
-  /** Trusted selection; defaults to OpenCode Console and never falls back between providers. */
-  OPENCODE_PROVIDER: string;
-  /** OpenCode Console secret. Used only when OPENCODE_PROVIDER is `opencode`. */
-  OPENCODE_API_KEY: string;
-  /** Optional explicit legacy route secret; used only when OPENCODE_PROVIDER is `openai`. */
-  OPENAI_API_KEY?: string;
-  /** Unprefixed model identifier for the explicitly selected provider. */
-  OPENCODE_MODEL: string;
   SANDBOX: SandboxNamespace;
-}
-
-export function providerForTargetJobEnvironment(
-  env: Pick<TargetJobEnvironment, 'OPENCODE_PROVIDER' | 'OPENCODE_API_KEY' | 'OPENAI_API_KEY' | 'OPENCODE_MODEL'>,
-): HostedProviderSettings {
-  return resolveHostedProvider({
-    provider: env.OPENCODE_PROVIDER,
-    model: env.OPENCODE_MODEL,
-    opencodeApiKey: env.OPENCODE_API_KEY,
-    ...(env.OPENAI_API_KEY !== undefined ? { openAiApiKey: env.OPENAI_API_KEY } : {}),
-  });
 }
 
 type TargetJobContext = ConstructorParameters<typeof DurableObject<TargetJobEnvironment>>[0];
@@ -1489,7 +1470,7 @@ export class TargetJobDO extends DurableObject<TargetJobEnvironment> {
     if (this.agent) return;
     const hostPromise = createOpenCodeAgent({
       storage: this.ctx.storage,
-      provider: providerForTargetJobEnvironment(this.env),
+      provider: resolveHostedProviderEnvironment(this.env),
       loadProtectedPaths: async request => {
         const registration = await this.registry.getTrackingRegistration(request.plan.trackingId);
         if (!registration || !registration.active || registration.policyHash !== request.plan.policyHash) {

@@ -7,6 +7,11 @@ This is not a fork-merging bot or a language translator alone. Track a retry pol
 Status: an initial implementation with offline integration tests, a passing local Rust → TypeScript synchronization demo, and two passing pinned public-upstream adoption cases using the real OpenCode V2 CLI, including a combined multi-repository collection run. The hosted model-powered sync has not yet been verified; the demo workflow is manual-only. These controlled tests are not a guarantee of correctness for arbitrary projects.
 
 A separate, experimental self-hosted [Cloudflare GitHub App backend](apps/cloudflare/README.md) is under development; it is not production-approved and does not replace this CLI.
+Its provider and GitHub App credentials are configured once per hosted service
+and reused across registered repositories. Branch and tag push webhooks wake
+matching upstream checks; selected-path filtering decides whether model work is
+needed. See [shared setup](apps/cloudflare/README.md#configure-shared-credentials-once)
+and [event-driven updates](apps/cloudflare/README.md#event-driven-updates).
 
 ## See it in action
 

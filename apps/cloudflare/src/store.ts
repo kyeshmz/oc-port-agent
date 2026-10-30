@@ -101,8 +101,8 @@ export interface UpstreamPushWebhookUpdate {
   evidence: WebhookPayloadEvidence;
   /** Canonical `https://github.com/<owner>/<name>.git`, matching stored policy upstreams. */
   upstreamRepository: string;
-  /** Branch name without the `refs/heads/` prefix. */
-  upstreamRef: string;
+  /** Branches match the stored ref; tags wake all eligible registrations for this repository. */
+  pushedRef: { kind: 'branch'; name: string } | { kind: 'tag'; name: string };
   workPrefix: string;
   /** Fallback poll time for every registration this push enqueued. */
   nextDueAt: string;
@@ -606,7 +606,9 @@ export class D1RegistryStore implements TrackingStorePort {
     if (input.evidence.payloadClass !== 'event') throw new StoreError('invalid-webhook-payload-class');
     if (input.upstreamRepository.length > 600
       || !/^https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\.git$/.test(input.upstreamRepository)
-      || !validBranch(input.upstreamRef) || !/^hook_[a-f0-9]{64}$/i.test(input.workPrefix)
+      || !['branch', 'tag'].includes(input.pushedRef.kind) || !validBranch(input.pushedRef.name)
+      || input.pushedRef.name.split('/').some(part => part.startsWith('.') || part.endsWith('.lock'))
+      || !/^hook_[a-f0-9]{64}$/i.test(input.workPrefix)
       || !validTimestamp(input.nextDueAt)) throw new StoreError('invalid-push-poll-work');
     const claim = crypto.randomUUID();
     const insert = this.db.prepare(`
@@ -616,11 +618,11 @@ export class D1RegistryStore implements TrackingStorePort {
       JOIN installations i ON i.installation_id = t.installation_id AND i.status = 'active'
       JOIN installation_repositories r ON r.installation_id = t.installation_id
         AND lower(r.full_name) = lower(t.target_full_name) AND r.active = 1
-      WHERE lower(t.upstream_repository) = lower(?) AND t.upstream_ref = ? AND t.active = 1
+      WHERE lower(t.upstream_repository) = lower(?) AND (? = 'tag' OR t.upstream_ref = ?) AND t.active = 1
         AND ${acceptedDeliveryExistsSql()}
       ON CONFLICT (work_id) DO NOTHING
     `).bind(input.workPrefix, input.delivery.receivedAt, input.delivery.receivedAt,
-      input.upstreamRepository, input.upstreamRef,
+      input.upstreamRepository, input.pushedRef.kind, input.pushedRef.name,
       input.delivery.installationId, input.evidence.payloadDigest, claim);
     const postpone = this.db.prepare(`
       UPDATE tracking_schedules SET next_due_at = ?

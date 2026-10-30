@@ -24,6 +24,7 @@ import { GitHubClientError, type RegistrationGitHubPort } from '../src/github.js
 import { DEFAULT_LIMITS, parsePolicy, policyHash } from '../src/policy.js';
 import {
   D1RegistryStore,
+  flushQueueOutbox,
   type D1DatabaseBinding,
   type D1PreparedStatementBinding,
   type D1QueryResult,
@@ -1088,7 +1089,7 @@ async function pushSetup() {
     now: () => clock.now,
   };
   const worker = createWorker(dependencies);
-  const push = async (fields: Record<string, unknown>, deliveryId: string) => {
+  const push = async (fields: Record<string, unknown>, deliveryId: string, event = 'push') => {
     const payload = JSON.stringify({
       ref: 'refs/heads/main',
       before: 'b'.repeat(40),
@@ -1098,7 +1099,7 @@ async function pushSetup() {
       repository: { full_name: 'Upstream-Org/Project' },
       ...fields,
     });
-    return worker.fetch(await signedWebhook(payload, 'push', deliveryId), env, { waitUntil: () => undefined });
+    return worker.fetch(await signedWebhook(payload, event, deliveryId), env, { waitUntil: () => undefined });
   };
   return { db, store, queue, env, dependencies, clock, push };
 }
@@ -1128,22 +1129,22 @@ describe('upstream push webhooks', () => {
     db.database.close();
   });
 
-  it('does not enqueue a replayed delivery a second time', async () => {
+  it.each(['refs/heads/main', 'refs/tags/v1.0.0'])('does not enqueue a replayed %s delivery a second time', async ref => {
     const { db, queue, push } = await pushSetup();
-    await push({}, 'push-replay');
-    const replay = await push({}, 'push-replay');
+    await push({ ref }, 'push-replay');
+    const replay = await push({ ref }, 'push-replay');
     expect(await replay.json()).toEqual({ accepted: false, duplicate: true });
-    const retagged = await push({}, 'push-replay-new-header');
+    const retagged = await push({ ref }, 'push-replay-new-header');
     expect(await retagged.json()).toEqual({ accepted: false, duplicate: true });
     expect(queue.sent).toEqual([pushPoll('tracking_main')]);
     db.database.close();
   });
 
-  it('ignores pushes to other branches, tag pushes, and branch deletions', async () => {
+  it('ignores pushes to other branches and branch/tag deletions', async () => {
     const { db, queue, push } = await pushSetup();
     for (const [fields, deliveryId] of [
       [{ ref: 'refs/heads/develop' }, 'push-other-branch'],
-      [{ ref: 'refs/tags/v1.0.0' }, 'push-tag'],
+      [{ ref: 'refs/tags/v1.0.0', deleted: true, after: '0'.repeat(40) }, 'push-tag-deleted'],
       [{ deleted: true, after: '0'.repeat(40) }, 'push-branch-deleted'],
     ] as const) {
       const response = await push(fields, deliveryId);
@@ -1155,9 +1156,88 @@ describe('upstream push webhooks', () => {
     db.database.close();
   });
 
-  it('ignores pushes to repositories that no registration tracks', async () => {
+  it('uses tag pushes to wake all eligible stored branches across installations, without adopting the tag SHA', async () => {
+    const { db, store, queue, push } = await pushSetup();
+    const main = await store.getTrackingRegistration('tracking_main');
+    if (!main) throw new Error('missing fixture registration');
+    for (const [id, installationId, upstream, active] of [
+      ['tracking_release', 77, { repository: upstreamRepository, ref: 'release' }, true],
+      ['tracking_other_repo', 23, { repository: 'https://github.com/other/project.git', ref: 'main' }, true],
+      ['tracking_suspended', 88, { repository: upstreamRepository, ref: 'main' }, true],
+      ['tracking_removed', 99, { repository: upstreamRepository, ref: 'main' }, true],
+    ] as const) {
+      const policy = parsePolicy({ ...rawPolicy(), upstream });
+      await store.createTrackingRegistration({
+        id, installationId, target, baseBranch: id, upstream: { ...upstream, baselineCommit: baseline },
+        policy, policyHash: await policyHash(policy), active,
+      });
+    }
+    db.database.prepare("UPDATE installations SET status = 'suspended' WHERE installation_id = 88").run();
+    db.database.prepare('UPDATE installation_repositories SET active = 0 WHERE installation_id = 99').run();
+    const response = await push({ ref: 'refs/tags/releases/v1.0.0', installation: { id: 1234 }, after: 'e'.repeat(40) }, 'tag-wake');
+    expect(await response.json()).toEqual({ accepted: true, duplicate: false });
+    expect(queue.sent).toHaveLength(2);
+    expect(queue.sent).toEqual(expect.arrayContaining([pushPoll('tracking_main'), pushPoll('tracking_release')]));
+    expect(await store.getTrackingRegistration('tracking_main')).toEqual(main);
+    expect(await store.getTrackingRegistration('tracking_release')).toMatchObject({
+      upstream: { repository: upstreamRepository, ref: 'release', baselineCommit: baseline },
+      lastCheckedCommit: baseline, lastSyncedCommit: baseline,
+    });
+    const due = db.database.prepare('SELECT next_due_at FROM tracking_schedules WHERE tracking_id = ?').get('tracking_release') as { next_due_at: string };
+    expect(due.next_due_at).toBe(new Date(nowMs + 24 * 60 * 60_000).toISOString());
+    queue.sent.length = 0;
+    await push({ ref: 'refs/heads/release', after: 'f'.repeat(64) }, 'release-branch');
+    expect(queue.sent).toEqual([pushPoll('tracking_release')]);
+    db.database.close();
+  });
+
+  it.each([
+    { ref: 'refs/tags/' }, { ref: 'refs/tags/.hidden' }, { ref: 'refs/tags/v1.lock' },
+    { ref: 'refs/tags/a/../b' }, { ref: 'refs/tags/a//b' }, { ref: 'refs/tags/a b' },
+    { ref: 'refs/heads/main.lock' }, { ref: 'refs/pull/1/head' },
+    { after: 'not-a-sha' }, { after: '0'.repeat(40) }, { ref: 'refs/tags/v1', after: '0'.repeat(64) },
+  ])('rejects invalid nondeleted push $ref $after without enqueuing', async fields => {
     const { db, queue, push } = await pushSetup();
-    const response = await push({ repository: { full_name: 'someone-else/project' } }, 'push-untracked');
+    const response = await push(fields, 'invalid-push');
+    expect(response.status).toBe(400);
+    expect(queue.sent).toEqual([]);
+    expect(db.database.prepare('SELECT * FROM queue_outbox').all()).toEqual([]);
+    db.database.close();
+  });
+
+  it('binds signed tag bodies to push events even when delivery/event headers change', async () => {
+    const { db, queue, push } = await pushSetup();
+    const fields = { ref: 'refs/tags/v2' };
+    const wrongEvent = await push(fields, 'tag-wrong-event', 'installation');
+    expect(await wrongEvent.json()).toMatchObject({ accepted: true, ignored: true });
+    expect(queue.sent).toEqual([]);
+    const replay = await push(fields, 'tag-new-event-header');
+    expect(await replay.json()).toEqual({ accepted: false, duplicate: true });
+    expect(queue.sent).toEqual([]);
+    await push({ ref: 'refs/tags/v3' }, 'tag-valid');
+    expect(queue.sent).toEqual([pushPoll('tracking_main')]);
+    db.database.close();
+  });
+
+  it('persists tag wake-up work through queue failure and retries the same identity-only outbox item', async () => {
+    const { db, queue, clock, push } = await pushSetup();
+    queue.fail = true;
+    const response = await push({ ref: 'refs/tags/v1' }, 'tag-queue-failure');
+    expect(response.status).toBe(202);
+    const pending = db.database.prepare('SELECT * FROM queue_outbox').all();
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ tracking_id: 'tracking_main', status: 'pending', attempts: 1 });
+    queue.fail = false;
+    clock.now += 60_000;
+    await flushQueueOutbox({ store: new D1RegistryStore(db, () => nowIso), queue, now: () => clock.now, limit: 100 });
+    expect(queue.sent).toEqual([pushPoll('tracking_main')]);
+    expect(db.database.prepare('SELECT status FROM queue_outbox').get()).toMatchObject({ status: 'sent' });
+    db.database.close();
+  });
+
+  it.each(['refs/heads/main', 'refs/tags/v1'])('ignores %s pushes to repositories that no registration tracks', async ref => {
+    const { db, queue, push } = await pushSetup();
+    const response = await push({ ref, repository: { full_name: 'someone-else/project' } }, 'push-untracked');
     expect(await response.json()).toEqual({ accepted: true, duplicate: false });
     expect(queue.sent).toEqual([]);
     await push({}, 'push-control');
@@ -1176,9 +1256,9 @@ describe('upstream push webhooks', () => {
     db.database.close();
   });
 
-  it('postpones the fallback poll of a push-triggered registration by the fallback interval', async () => {
+  it.each(['refs/heads/main', 'refs/tags/v1'])('postpones the fallback poll of a %s-triggered registration by the fallback interval', async ref => {
     const { db, queue, env, dependencies, clock, push } = await pushSetup();
-    await push({}, 'push-postpones-fallback');
+    await push({ ref }, 'push-postpones-fallback');
     await runScheduler(env, dependencies);
     expect(queue.sent).toEqual([pushPoll('tracking_main')]);
     clock.now = nowMs + 24 * 60 * 60 * 1_000;
