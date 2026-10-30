@@ -9,6 +9,10 @@ registered repositories**. Install the App on your GitHub account, select the
 repositories it may access, and register their tracking policies. Adding another
 repository does not require another provider key or repository secret.
 
+**Public upstreams need no installation or setup.** The service independently
+checks GitHub's commit and tag Atom feeds, then queues relevant target checks.
+Install the App on the target repositories where it needs to publish proposals.
+
 ## Release status
 
 **Not production-approved. Do not deploy this package for unattended use yet.**
@@ -37,11 +41,12 @@ behavior.
   installed Sandbox preview `Sandbox` class.
 - `wrangler.jsonc` targets the dedicated live-test Worker and declares its D1,
   Queue producer/consumer, target-job and Sandbox Durable Objects, D1 migration
-  directory, pinned public Container image, and Workers logs/traces. Cron is
-  intentionally disabled until registration/run checks are approved.
-- D1 holds installation, tracking, webhook replay, scheduling, and queue-outbox
-  records. Each target Durable Object has its own SQLite storage for job state
-  and the OpenCode SDK. The Workerd smoke confirms SDK-first schema
+  directory, pinned public Container image, and Workers logs/traces. A five-minute
+  cron drives public upstream feed discovery, due fallback checks, and outbox
+  recovery.
+- D1 holds installation, tracking, shared upstream feed state, webhook replay,
+  scheduling, and queue-outbox records. Each target Durable Object has its own
+  SQLite storage for job state and the OpenCode SDK. The Workerd smoke confirms SDK-first schema
   initialization and session/job persistence across test eviction; provider-backed
   model execution remains untested.
 - The installed `@cloudflare/sandbox@0.13.0-next.776.1` preview remains the
@@ -64,7 +69,7 @@ behavior.
 - Review the Worker CPU/subrequest limits, Container instance capacity and
   size, allowed verification commands, maximum job/attempt/output limits,
   Cloudflare billing, and provider spending limits before any real deployment.
-  The `max_instances: 5` and `instance_type: "standard-1"` values in the
+  The `max_instances: 1` and `instance_type: "standard-1"` values in the
   Wrangler config are starting operator choices, not a cost estimate or
   reviewed production capacity plan.
 
@@ -98,6 +103,11 @@ SQLite Durable Object migration is declared in Wrangler and is applied as part
 of an operator-controlled Worker deployment. The local `build` script is a
 dry-run and does not deploy or register remote resources.
 
+Existing deployments must apply the additive `0002_upstream_feeds.sql` migration
+before deploying the updated Worker. The remote sequence below applies all
+pending migrations first. Existing registrations automatically become shared
+feed watches on a scheduler run; they do not need to be registered again.
+
 ## Create the GitHub App
 
 Use [`github-app-manifest.json`](./github-app-manifest.json) as the least-
@@ -130,46 +140,76 @@ a public upstream does not require installation membership.
 
 ### Event-driven updates
 
-GitHub **Push** webhooks are the primary sync trigger. Install the App on the
-upstream repositories you control as well as the target repositories. The same
-Push subscription covers branch and tag pushes; no additional provider key or
-per-repository Actions workflow is needed.
+#### Independent public upstream monitoring
 
-| Event | Work scheduled |
+The App only needs installation on the **target**. For public GitHub upstreams,
+registrations automatically supply the repository and branch for shared Atom
+feed watches:
+
+| Feed | Example | Targets checked when it changes |
+| --- | --- | --- |
+| Branch commits | `https://github.com/photon-hq/spectrum-ts/commits/main.atom` | Eligible registrations tracking that repository and branch |
+| Repository tags | `https://github.com/photon-hq/spectrum-ts/tags.atom` | Eligible registrations tracking any branch of that repository |
+
+The checked-in `*/5 * * * *` cron checks up to 20 due feeds every five minutes,
+with four requests in flight. Oldest-due watches go first; larger watch sets can
+take multiple ticks. A branch watch is shared across targets and installations;
+the tags watch is shared across the repository's branches. This avoids a separate
+full repository check for every registered target on each tick.
+
+D1 retains conditional-request validators and the last successful feed
+fingerprint across Worker restarts. `304 Not Modified` and identical feed bodies
+produce no jobs. Changed feeds write identity-only work to the durable outbox.
+Public feed requests carry no App or provider credentials, and neither feed
+content nor a feed's commit SHA is passed to the model or adopted as a checkpoint.
+Unavailable feeds retain their last good observation and retry with backoff, up
+to six hours. Each request and body read is bounded to 10 seconds and 512 KiB.
+The first observation establishes a snapshot while the registration's initial
+full check remains due; subsequent changed observations schedule feed-triggered
+work. Leases and transactional completion prevent duplicate or stale observations
+from overwriting newer state or enqueueing duplicate work.
+
+These are lightweight **periodic feed checks**, not instant push delivery. No
+upstream workflow, App installation, webhook, or owner cooperation is needed.
+Both Spectrum feed URLs above were checked without authentication and returned
+`200`, followed by `304` for matching `If-None-Match` requests. GitHub's docs
+repository also [lists these feed forms](https://github.com/github/docs/issues/38439).
+Private upstreams still require authorized read access; public feeds do not
+replace that access.
+
+#### Optional push webhooks
+
+When the App is also installed on an upstream, GitHub **Push** webhooks provide
+an additional immediate trigger. The same subscription covers branches and tags.
+
+| Webhook | Work scheduled |
 | --- | --- |
-| Push to a tracked branch | Check active registrations matching that upstream repository and branch |
-| Tag created or updated by a push | Check every active registration for that upstream repository, using each registration's configured branch |
+| Push to a tracked branch | Check active registrations matching the upstream repository and branch |
+| Tag created or updated by a push | Check every eligible registration for that repository using its configured branch |
 | Branch or tag deletion | No adaptation work |
 | A tracked proposal PR merges | Reconcile its checkpoint against GitHub's current state |
 
-The Worker verifies the exact webhook body, records replay protection and a
-durable outbox entry, then sends identity-only work to the target queue. This
-immediately flushes up to 100 pending outbox records without a scheduler tick;
-larger backlogs and failed sends need the configured cron below. The internal
-queue kind `poll` means a single upstream check; it does not mean that the
-webhook starts a polling loop. An upstream event may come from a different App
-installation than the target's.
+The Worker verifies the exact body and records replay protection plus a durable
+outbox entry before queue delivery. It immediately flushes up to 100 pending
+records without a scheduler tick; the cron handles larger backlogs and failed
+sends. An upstream webhook may come from a different installation than the
+target's. GitHub only sends these pushes for upstreams where the App is installed;
+feed monitoring operates independently of that installation.
 
-Each check reads the repository and branch from the stored policy and obtains
-the authoritative commit/diff from GitHub. A tag is a wake-up signal: it does
-not replace the tracked branch or make the payload's SHA a trusted checkpoint.
-Tag-pinned or latest-release-only adoption is a separate policy capability.
-Unchanged heads and changes outside the selected upstream paths do not invoke
-the model. Selected paths determine whether model work is needed; acceptance
-criteria guide adaptation and verification. This does not classify semantic
-breaking changes automatically.
+#### Authoritative checks and recovery
 
-Upstreams without the App, such as third-party repositories, need an owner to
-install the App or forward notifications; installation on your downstream repo
-alone cannot receive their pushes. A daily fallback check also covers missed
-events, including GitHub's documented limits on bulk tag pushes and oversized
-webhook payloads. See the [Push event contract](https://docs.github.com/en/webhooks/webhook-events-and-payloads#push).
-That fallback needs a Worker cron trigger, for example
-`"triggers": { "crons": ["17 * * * *"] }`. The hourly tick only enqueues
-registrations whose daily poll is due, and a push postpones the next fallback
-poll by a day. It also retries pending queue-outbox deliveries after temporary
-queue failures. Cron stays disabled in the checked-in config until
-registration/run checks are approved.
+Every queued check reads the repository and branch from the stored policy and
+obtains the authoritative head/diff from GitHub. Tags and feed observations are
+wake-up hints; they never replace the branch or baseline. The internal queue
+kind `poll` means one check, not a polling loop. Unchanged heads and changes
+outside selected paths make no model calls. Acceptance criteria guide adaptation
+and verification; this is not automatic breaking-change classification.
+
+Daily full checks cover feed gaps, unavailable/private feeds, and missed push
+deliveries. Feed checks alone do not reset that daily schedule. Push webhooks
+postpone the next fallback check by a day. The same five-minute cron drains due
+outbox retries, so deploy with its trigger enabled. GitHub can omit push events
+for bulk tags or oversized payloads; see the [Push event contract](https://docs.github.com/en/webhooks/webhook-events-and-payloads#push).
 
 ## Configure shared credentials once
 
@@ -288,12 +328,12 @@ proves Linux isolation or a deployed Container.
 Local verification on 2026-10-30 (Node 22.23.3, pinned dependencies):
 
 - Generated Wrangler types and app typecheck passed.
-- The full hosted suite passed **203 tests across 12 files**, including signed
-  branch/tag webhook dispatch without cron and model-free unchanged/unselected
-  follow-ups.
+- The full hosted suite passed **212 tests across 12 files**, including anonymous
+  scheduled-feed discovery with target-only installations, signed branch/tag
+  webhook dispatch without cron, and model-free unchanged/unselected follow-ups.
 - The explicit Workerd smoke passed **2 tests**, including real SDK session and
   app job recovery after Durable Object eviction.
-- The Worker-only dry run passed at **22,827.49 KiB / 3,970.65 KiB gzip**.
+- The Worker-only dry run passed at **22,838.21 KiB / 3,973.34 KiB gzip**.
 
 The Workerd test preloads the real SDK before constructing the Durable Object.
 Vite resolves dynamic imports over RPC; doing that while the startup input gate
