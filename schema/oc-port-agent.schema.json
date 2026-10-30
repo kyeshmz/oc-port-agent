@@ -10,6 +10,7 @@
     "version": { "const": 1 },
     "baselineCommit": { "type": "string", "pattern": "^([a-f0-9]{40}|[a-f0-9]{64})$", "description": "Explicitly reviewed bootstrap baseline used only when this policy has no checkpoint. Never resolves HEAD and never replaces a saved checkpoint." },
     "allowSkillEdits": { "type": "array", "uniqueItems": true, "items": { "type": "string", "maxLength": 64, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" }, "description": "Opt in to exact skill IDs under .opencode/skills. Explicit target paths are also required; agents, config, nested skill registrations and checkpoints remain protected." },
+    "allowNulTextPaths": { "type": "array", "default": [], "uniqueItems": true, "items": { "type": "string", "minLength": 1, "pattern": "^(?!/)(?!.*[\\\\*?\\[\\]{}\\u0000-\\u001f])(?!.*(?:^|/)(?:\\.\\.?|)(?:/|$)).+$" }, "description": "Exact selected, non-excluded upstream files declared to be UTF-8 text containing literal NUL. Original blob bytes must still be valid UTF-8; symlinks/submodules remain rejected. Text-read allowance only, not edit permission. Changes require explicit checkpoint review." },
     "reviewMetadataPaths": { "$ref": "#/$defs/strings", "description": "Exact, already selected provenance/registry files that may record skipped reviews. No globs or scope expansion; applied decisions still need nonmetadata target changes." },
     "upstream": {
       "type": "object", "additionalProperties": false, "required": ["repository", "ref"],

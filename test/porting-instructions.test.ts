@@ -83,10 +83,16 @@ test('real draft 2020-12 schemas resolve local shared refs and accept both examp
   assert.ok(validateCli, 'CLI schema should compile with its sibling $ref');
   assert.ok(validateHosted, 'hosted schema should compile with its sibling $ref');
   assert.ok(validateInstructions, 'shared instruction schema should compile');
+  assert.equal(validateCli({ ...configInput(), allowNulTextPaths: ['src/spectrum.ts'] }), true, JSON.stringify(validateCli.errors));
+  for (const path of ['/src/a.ts', '../src/a.ts', 'src/../a.ts', 'src/./a.ts', 'src//a.ts', 'src/', 'src/*.ts', 'src/a.?s', 'src/[a].ts', 'src/{a}.ts', 'src\\a.ts', 'src/a\0.ts']) {
+    assert.equal(validateCli({ ...configInput(), allowNulTextPaths: [path] }), false, path);
+  }
+  assert.equal(validateCli({ ...configInput(), allowNulTextPaths: ['src/a.ts', 'src/a.ts'] }), false);
   const cliExample: unknown = JSON.parse(await readFile(join(exampleDirectory, 'porting-policy.json'), 'utf8'));
   const hostedExample: unknown = JSON.parse(await readFile(join(exampleDirectory, 'hosted-porting-policy.json'), 'utf8'));
   assert.equal(validateCli(cliExample), true, JSON.stringify(validateCli.errors));
   assert.equal(validateHosted(hostedExample), true, JSON.stringify(validateHosted.errors));
+  assert.equal(validateHosted({ ...(hostedExample as Record<string, unknown>), allowNulTextPaths: ['src/spectrum.ts'] }), false, 'NUL allowance is CLI-only');
 
   assert.equal(validateInstructions({ goal: 'Valid 😀 goal', adaptation: [], nonGoals: [] }), true);
   assert.equal(validateInstructions({ goal: '😀'.repeat(4096) }), true);

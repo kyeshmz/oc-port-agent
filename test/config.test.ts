@@ -79,6 +79,30 @@ test('policy changes require an explicit baseline, but model changes do not', ()
   original.preserve.push('New invariant');
   assert.throws(() => parseState(state, original), /Tracking policy changed/);
 });
+test('NUL text paths must be unique exact upstream selections, not excluded paths or target scope', () => {
+  for (const paths of [null, 'src/client.ts', [''], ['/src/client.ts'], ['../src/client.ts'], ['src/../client.ts'], ['src/./client.ts'], ['src//client.ts'], ['src\\client.ts'], ['src/*.ts'], ['src/client.?s'], ['src/[a].ts'], ['src/{a}.ts'], ['src/client.ts\0'], ['other/client.ts'], ['src/client.ts', 'src/client.ts']]) {
+    assert.throws(() => parseConfig({ ...configInput(), allowNulTextPaths: paths }), /allowNulTextPaths/, JSON.stringify(paths));
+  }
+  const input = configInput();
+  const selection = (input.selections as Record<string, unknown>[])[0]!;
+  selection.excludeUpstreamPaths = ['src/generated/**'];
+  assert.throws(() => parseConfig({ ...input, allowNulTextPaths: ['src/generated/client.ts'] }), /not excluded/);
+  selection.targetPaths = ['target/**'];
+  assert.deepEqual(parseConfig({ ...input, allowNulTextPaths: ['src/client.ts'] }).allowNulTextPaths, ['src/client.ts']);
+});
+test('empty NUL allowance preserves legacy hashes; adding, changing, or removing it invalidates checkpoints', () => {
+  const original = parseConfig(configInput());
+  assert.deepEqual(original.allowNulTextPaths, []);
+  assert.equal(policyHash(parseConfig({ ...configInput(), allowNulTextPaths: [] })), policyHash(original));
+  const allowed = parseConfig({ ...configInput(), allowNulTextPaths: ['src/client.ts'] });
+  const changed = parseConfig({ ...configInput(), allowNulTextPaths: ['src/other.ts'] });
+  assert.notEqual(policyHash(allowed), policyHash(original));
+  assert.notEqual(policyHash(allowed), policyHash(changed));
+  const state = (config: typeof original) => ({ version: 1, upstream: config.upstream, policyHash: policyHash(config), lastSyncedCommit: 'a'.repeat(40) });
+  assert.throws(() => parseState(state(original), allowed), /Tracking policy changed/);
+  assert.throws(() => parseState(state(allowed), changed), /Tracking policy changed/);
+  assert.throws(() => parseState(state(allowed), original), /Tracking policy changed/);
+});
 test('reports require a complete unique decision for every selection and stop on blockers', () => {
   assert.throws(() => parseReport({ summary: 'Done', decisions: [] }, plan()), /omitted/);
   assert.throws(() => parseReport({ summary: 'Done', decisions: [{ selection: 'unknown', status: 'applied', reason: 'x' }] }, plan()), /unique/);

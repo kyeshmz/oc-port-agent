@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile, lstat } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { CONFIG, checkpointPath, type Config, type Selection, type State, loadConfig, parseState, policyHash, safePath, selected } from './config.js';
-import { git, run } from './process.js';
+import { git, run, runBytes } from './process.js';
 
 export interface SourceFile { path: string; content: string }
 export interface Plan {
@@ -65,7 +65,7 @@ export async function setBaseline(root: string, commit: string, file = CONFIG): 
   return state;
 }
 
-async function sourceFiles(cache: string, sha: string, selections: Selection[]): Promise<SourceFile[]> {
+async function sourceFiles(cache: string, sha: string, selections: Selection[], allowNulTextPaths: string[]): Promise<SourceFile[]> {
   const entries = (await git(cache, ['ls-tree', '-r', '-z', sha])).split('\0').filter(Boolean);
   const result: SourceFile[] = [];
   for (const entry of entries) {
@@ -75,8 +75,14 @@ async function sourceFiles(cache: string, sha: string, selections: Selection[]):
     if (tab < 0 || !safePath(path)) throw new Error(`Unsafe upstream path: ${JSON.stringify(path)}`);
     const [mode, type, blob] = entry.slice(0, tab).split(' ');
     if (type !== 'blob' || !['100644', '100755'].includes(mode!)) throw new Error(`Selected upstream symlink/submodule needs manual handling: ${path}`);
-    const content = await git(cache, ['cat-file', 'blob', blob!]);
-    if (content.includes('\0') || content.includes('\ufffd')) throw new Error(`Selected binary or non-UTF-8 file needs manual handling: ${path}`);
+    const raw = await runBytes('git', ['cat-file', 'blob', blob!], cache);
+    if (raw.code !== 0) throw new Error(`Reading upstream blob failed: ${path}\n${raw.stderr}`);
+    let content: string;
+    try {
+      // ignoreBOM preserves a leading U+FEFF, rather than stripping source bytes.
+      content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw.stdout);
+    } catch { throw new Error(`Selected non-UTF-8 file needs manual handling: ${path}`); }
+    if (content.includes('\0') && !allowNulTextPaths.includes(path)) throw new Error(`Selected binary or non-UTF-8 file needs manual handling: ${path}`);
     result.push({ path, content });
   }
   return result;
@@ -105,8 +111,8 @@ export async function planSync(root: string, full = false, file = CONFIG): Promi
   const selections = config.selections.filter(selection => full || changedPaths.some(path => selected(path, selection)));
   const paths = changedPaths.filter(path => selections.some(selection => selected(path, selection)));
   const diff = paths.length ? await git(cache, ['diff', '--no-ext-diff', '--no-textconv', '--no-renames', state.lastSyncedCommit, head, '--', ...paths]) : '';
-  const before = selections.length ? await sourceFiles(cache, state.lastSyncedCommit, selections) : [];
-  const after = selections.length ? await sourceFiles(cache, head, selections) : [];
+  const before = selections.length ? await sourceFiles(cache, state.lastSyncedCommit, selections, config.allowNulTextPaths) : [];
+  const after = selections.length ? await sourceFiles(cache, head, selections, config.allowNulTextPaths) : [];
   if (full && !before.length && !after.length) throw new Error('No upstream files match the configured selections');
   const plan: Plan = { mode: full ? 'adopt' : 'sync', from: state.lastSyncedCommit, to: head, commits, changedPaths, selections, diff, before, after };
   const bytes = Buffer.byteLength(JSON.stringify(plan));

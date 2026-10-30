@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
 
 export interface CommandResult { code: number; stdout: string; stderr: string; durationMs: number }
-export async function run(command: string, args: string[], cwd: string, timeoutSeconds = 120, env = process.env): Promise<CommandResult> {
+export interface RawCommandResult extends Omit<CommandResult, 'stdout'> { stdout: Buffer }
+export async function runBytes(command: string, args: string[], cwd: string, timeoutSeconds = 120, env = process.env): Promise<RawCommandResult> {
   const start = Date.now();
   return new Promise(resolve => {
     const childEnv = { ...env };
@@ -40,9 +41,13 @@ export async function run(command: string, args: string[], cwd: string, timeoutS
     child.on('close', (code, signal) => {
       clearTimeout(timer);
       if (escalation) clearTimeout(escalation);
-      resolve({ code: problem ? 1 : (code ?? 1), stdout: Buffer.concat(stdout).toString('utf8'), stderr: `${Buffer.concat(stderr).toString('utf8')}${problem || signal ? `\n${problem || `Terminated by ${signal}`}` : ''}`, durationMs: Date.now() - start });
+      resolve({ code: problem ? 1 : (code ?? 1), stdout: Buffer.concat(stdout), stderr: `${Buffer.concat(stderr).toString('utf8')}${problem || signal ? `\n${problem || `Terminated by ${signal}`}` : ''}`, durationMs: Date.now() - start });
     });
   });
+}
+export async function run(command: string, args: string[], cwd: string, timeoutSeconds = 120, env = process.env): Promise<CommandResult> {
+  const result = await runBytes(command, args, cwd, timeoutSeconds, env);
+  return { ...result, stdout: result.stdout.toString('utf8') };
 }
 export async function mustRun(command: string, args: string[], cwd: string, timeoutSeconds = 120): Promise<string> {
   const result = await run(command, args, cwd, timeoutSeconds);
