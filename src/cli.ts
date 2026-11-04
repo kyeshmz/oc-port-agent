@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { initialize, planSync, repositoryRoot, setBaseline } from './upstream.js';
 import { synchronize } from './sync.js';
 import { planCollection } from './collection.js';
-import { checkHub, initPort, runHub } from './hub.js';
+import { checkHub, initPort, planHub, runHub, writeStatus } from './hub.js';
 import type { Plan } from './upstream.js';
 
 const HELP = `oc-port-agent — adopt and track selected upstream functionality using OpenCode V2
@@ -32,17 +32,24 @@ No automatic merging, no blind cherry-picking, no implicit GitHub publication.
 Run inside a hub repository that ports upstream changes into many target repositories:
   oc-port-agent hub init <name> --target owner/repo --upstream https://github.com/org/source.git [--ref main] [--base main] [--track releases|branch] [--tags 'v2.*']
   oc-port-agent hub check [--port <name>]
-  oc-port-agent hub run [--port <name>] [--model provider/model#variant]
+  oc-port-agent hub run [--port <name>] [--model provider/model#variant] [--reconcile-only]
+  oc-port-agent hub plan
+  oc-port-agent hub status
 hub init adds ports/<name>/ with target.json, upstreams/<id>.json and notes.md to fill in.
 hub check previews every port WITHOUT GitHub calls, a model, or state changes.
 hub run reconciles earlier PRs, ports new upstream changes and opens one draft PR per target.
+  --reconcile-only records PR outcomes but leaves porting to a run on the port's own runner.
+hub plan prints which ports have work today and the runner each needs, without writing anything.
+hub status rewrites STATUS.md from every ports/*/state.json.
 It needs GH_TOKEN with contents and pull request write access to the targets. All accept --hub <dir> (default: here).
 `;
 
 const HUB_OPTIONS: Record<string, string[]> = {
   init: ['hub', 'target', 'upstream', 'ref', 'base', 'track', 'tags'],
   check: ['hub', 'port'],
-  run: ['hub', 'port', 'model'],
+  run: ['hub', 'port', 'model', 'reconcile-only'],
+  plan: ['hub'],
+  status: ['hub'],
 };
 async function hubMain(positionals: string[], values: Record<string, string | boolean | undefined>, cwd: string): Promise<void> {
   const [command, name, ...rest] = positionals;
@@ -62,8 +69,17 @@ async function hubMain(positionals: string[], values: Record<string, string | bo
     console.log(`Created ${directory}. Fill in the EDIT ME parts of upstreams/*.json, the tests in target.json, and notes.md.`);
   } else if (command === 'check') {
     console.log(JSON.stringify(await checkHub(hub, text('port')), null, 2));
+  } else if (command === 'plan') {
+    // One line, so a workflow can write it straight to $GITHUB_OUTPUT.
+    console.log(JSON.stringify(await planHub(hub)));
+  } else if (command === 'status') {
+    await writeStatus(hub);
   } else {
-    const outcomes = await runHub(hub, { ...(text('port') !== undefined ? { port: text('port')! } : {}), ...(text('model') !== undefined ? { model: text('model')! } : {}) });
+    const outcomes = await runHub(hub, {
+      ...(text('port') !== undefined ? { port: text('port')! } : {}),
+      ...(text('model') !== undefined ? { model: text('model')! } : {}),
+      ...(values['reconcile-only'] === true ? { reconcileOnly: true } : {}),
+    });
     console.log(JSON.stringify(outcomes, null, 2));
     const failed = outcomes.filter(outcome => outcome.status === 'error');
     if (failed.length) throw new Error(`${failed.length} port(s) failed: ${failed.map(outcome => `${outcome.port}: ${outcome.message}`).join('\n')}`);
@@ -78,7 +94,7 @@ export async function main(argv = process.argv.slice(2), cwd = process.cwd()): P
     model: { type: 'string' },
     config: { type: 'string' },
     collection: { type: 'string' },
-    hub: { type: 'string' }, port: { type: 'string' }, target: { type: 'string' },
+    hub: { type: 'string' }, port: { type: 'string' }, target: { type: 'string' }, 'reconcile-only': { type: 'boolean' },
   } });
   if (values.help || !positionals.length) { console.log(HELP); return; }
   if (positionals[0] === 'hub') return hubMain(positionals.slice(1), values, cwd);

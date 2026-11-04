@@ -32,6 +32,14 @@ Run these in a hub repository (or pass `--hub <dir>`). Each folder
 | `hub init <name> --target owner/repo --upstream <url>` | Scaffold a port folder. Also accepts `--ref`, `--base`, `--track`, `--tags`. |
 | `hub check [--port <name>]` | Preview every port without GitHub calls, a model, or state changes. |
 | `hub run [--port <name>] [--model provider/model#variant]` | Reconcile earlier PRs, port new upstream changes, and open one draft PR per target. Writes `ports/*/state.json` and `STATUS.md`. Needs `GH_TOKEN` with contents and pull request write access to the targets. |
+| `hub run --reconcile-only` | Record PR outcomes and checkpoints, but leave porting to a run on the port's own runner. |
+| `hub plan` | Print, on one line of JSON, which ports have work today and the runner each needs. Writes nothing. |
+| `hub status` | Rewrite `STATUS.md` from every `ports/*/state.json`. |
+
+`target.json` may set `runner` (a GitHub Actions runner label, default
+`ubuntu-latest`) and `setup`, a list of `{ command, args, timeoutSeconds? }`
+toolchain commands such as `brew install ffmpeg`. Setup runs on that runner
+before the agent, outside the target clone, and only when there is something to port.
 
 An upstream file holds the policy fields `upstream`, `selections`, `preserve`,
 and optionally `limits`, `allowSkillEdits`, `allowNulTextPaths`, and

@@ -18,13 +18,16 @@ export const STATUS = 'STATUS.md';
 const NAME = /^[a-z0-9][a-z0-9._-]*$/;
 const REPOSITORY = /^[A-Za-z0-9][\w.-]*\/[A-Za-z0-9][\w.-]*$/;
 const BRANCH = /^[A-Za-z0-9._/-]+$/;
+const RUNNER = /^[a-z0-9][a-z0-9.-]*$/;
 const SHA = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const MAX_NOTES = 64 * 1024;
 const MAX_HISTORY = 20;
 // A failing change is attempted on two runs; after that it waits for a new release or an edited port.
 const MAX_FAILURES = 2;
 
-export interface Target { repository: string; base: string; draft: boolean }
+export interface SetupCommand { command: string; args: string[]; timeoutSeconds: number }
+// runner is the GitHub Actions runner for porting (e.g. macos-15); setup runs on it before the agent.
+export interface Target { repository: string; base: string; draft: boolean; runner: string; setup: SetupCommand[] }
 export interface PortSource { id: string; start?: string; config: Config }
 export interface Port { name: string; directory: string; target: Target; sources: PortSource[]; notes: string }
 
@@ -32,7 +35,7 @@ type Decision = Adaptation['report']['decisions'][number];
 interface Checkpoint { lastSyncedCommit: string; release?: string; selectionsHash: string; syncedAt: string }
 interface PendingSource { from: string; to: string; release?: string; selectionsHash: string; decisions?: Decision[] }
 interface HistoryEntry { at: string; outcome: 'merged' | 'closed' | 'skipped' | 'baselined'; pr?: string; sources: Record<string, { to: string; release?: string; decisions?: Decision[] }> }
-export type PortStatus = 'up-to-date' | 'proposal' | 'waiting' | 'skipped' | 'error';
+export type PortStatus = 'up-to-date' | 'proposal' | 'waiting' | 'skipped' | 'queued' | 'error';
 export interface PortState {
   version: 1;
   upstreams: Record<string, Checkpoint>;
@@ -51,7 +54,8 @@ export interface HubGitHub {
   pullRequest(repository: string, number: number): Promise<{ state: 'open' | 'closed'; merged: boolean; url: string }>;
   createPullRequest(request: { repository: string; base: string; head: string; title: string; body: string; draft: boolean }): Promise<{ number: number; url: string }>;
 }
-export interface HubOptions { port?: string; model?: string; github?: HubGitHub; invoke?: SyncOptions['invoke']; now?: () => Date }
+// reconcileOnly records PR outcomes and checkpoints but leaves porting to a run on the port's own runner.
+export interface HubOptions { port?: string; model?: string; reconcileOnly?: boolean; github?: HubGitHub; invoke?: SyncOptions['invoke']; now?: () => Date }
 
 // Uses gh's authentication (GH_TOKEN in CI). git reaches GitHub through `gh auth setup-git`.
 export const ghHub: HubGitHub = {
@@ -108,12 +112,25 @@ export async function loadPort(hub: string, name: string): Promise<Port> {
   if (!NAME.test(name)) throw new Error(`Port folder names must be lowercase, like my-app: ${name}`);
   const directory = join(hub, PORTS, name);
   const raw = object(await readJson(join(directory, 'target.json'), `ports/${name}/target.json`), `ports/${name}/target.json`);
-  keys(raw, ['$schema', 'version', 'repository', 'base', 'draft', 'verification', 'protectedPaths', 'opencode'], `ports/${name}/target.json`);
+  keys(raw, ['$schema', 'version', 'repository', 'base', 'draft', 'runner', 'setup', 'verification', 'protectedPaths', 'opencode'], `ports/${name}/target.json`);
   if (raw.version !== 1) throw new Error(`ports/${name}/target.json: version must be 1`);
   if (typeof raw.repository !== 'string' || !REPOSITORY.test(raw.repository)) throw new Error(`ports/${name}/target.json: repository must be owner/name`);
   const base = raw.base ?? 'main';
   if (typeof base !== 'string' || !BRANCH.test(base) || base.includes('..') || base.startsWith('/') || base.endsWith('/')) throw new Error(`ports/${name}/target.json: base must be a branch name`);
   if (raw.draft !== undefined && typeof raw.draft !== 'boolean') throw new Error(`ports/${name}/target.json: draft must be true or false`);
+  const runner = raw.runner ?? 'ubuntu-latest';
+  if (typeof runner !== 'string' || !RUNNER.test(runner)) throw new Error(`ports/${name}/target.json: runner must be a GitHub Actions runner label like ubuntu-latest or macos-15`);
+  if (raw.setup !== undefined && !Array.isArray(raw.setup)) throw new Error(`ports/${name}/target.json: setup must be a list of commands`);
+  const setup = ((raw.setup ?? []) as unknown[]).map((entry, index): SetupCommand => {
+    const where = `ports/${name}/target.json setup[${index}]`;
+    const command = object(entry, where);
+    keys(command, ['command', 'args', 'timeoutSeconds'], where);
+    if (typeof command.command !== 'string' || !command.command.trim() || command.command.startsWith('-')) throw new Error(`${where}: command must be an executable name`);
+    if (!Array.isArray(command.args ?? []) || (command.args as unknown[] ?? []).some(arg => typeof arg !== 'string' || arg.includes('\0'))) throw new Error(`${where}: args must be a list of strings`);
+    const timeout = command.timeoutSeconds ?? 600;
+    if (!Number.isInteger(timeout) || (timeout as number) < 1 || (timeout as number) > 3600) throw new Error(`${where}: timeoutSeconds must be between 1 and 3600`);
+    return { command: command.command, args: (command.args ?? []) as string[], timeoutSeconds: timeout as number };
+  });
   const upstreams = join(directory, 'upstreams');
   const files = await exists(upstreams) ? (await readdir(upstreams)).filter(file => file.endsWith('.json')).sort() : [];
   if (!files.length) throw new Error(`ports/${name}: add at least one upstreams/<id>.json`);
@@ -143,7 +160,7 @@ export async function loadPort(hub: string, name: string): Promise<Port> {
   const notesPath = join(directory, 'notes.md');
   const notes = await exists(notesPath) ? await readFile(notesPath, 'utf8') : '';
   if (Buffer.byteLength(notes) > MAX_NOTES) throw new Error(`ports/${name}/notes.md is larger than ${MAX_NOTES} bytes`);
-  return { name, directory, target: { repository: raw.repository, base, draft: raw.draft ?? true }, sources, notes };
+  return { name, directory, target: { repository: raw.repository, base, draft: raw.draft ?? true, runner, setup }, sources, notes };
 }
 
 export async function readState(directory: string): Promise<PortState> {
@@ -292,6 +309,7 @@ async function runPort(hub: string, port: Port, state: PortState, options: HubOp
   if (state.failed?.key === key && state.failed.count >= MAX_FAILURES) {
     return finish('error', { message: `Stopped after ${state.failed.count} failed attempts at these upstream changes. Edit ports/${port.name} to try again, or wait for a new upstream release. Last error: ${state.failed.message}` });
   }
+  if (options.reconcileOnly) return finish('queued', { message: `New upstream changes; they are ported on ${port.target.runner}.` });
 
   // 3. Port everything new into one fresh clone of the target, and open one PR.
   const scratch = await mkdtemp(join(tmpdir(), 'oc-port-hub-'));
@@ -303,6 +321,11 @@ async function runPort(hub: string, port: Port, state: PortState, options: HubOp
     // Agent scratch files stay out of the change set even if the target does not ignore them.
     await mkdir(join(root, '.git', 'info'), { recursive: true });
     await appendFile(join(root, '.git', 'info', 'exclude'), '\n.oc-port/\n');
+    for (const step of port.target.setup) {
+      // Toolchain setup runs beside the clone, so it can't add files to the change set.
+      const result = await run(step.command, step.args, scratch, step.timeoutSeconds);
+      if (result.code !== 0) throw new Error(`Setup ${JSON.stringify([step.command, ...step.args])} exited ${result.code}: ${oneLine(result.stderr || result.stdout, 1500)}`);
+    }
     const notes = agentNotes(port, state);
     const results: Result[] = [];
     for (const item of work) {
@@ -366,6 +389,24 @@ export async function runHub(hub: string, options: HubOptions = {}): Promise<Por
   }
   await writeStatus(hub, at);
   return outcomes;
+}
+
+export interface PlannedPort { port: string; runner: string; work: boolean }
+// Decides which ports need their own runner today, without writing anything. Ports with nothing to port
+// (or with errors to record) run reconcile-only on ubuntu-latest, so macOS runners are used only for real work.
+export async function planHub(hub: string, options: HubOptions = {}): Promise<PlannedPort[]> {
+  const planned: PlannedPort[] = [];
+  for (const name of await listPorts(hub)) {
+    if (!NAME.test(name)) continue;
+    let entry: PlannedPort = { port: name, runner: 'ubuntu-latest', work: false };
+    try {
+      const port = await loadPort(hub, name);
+      const outcome = await runPort(hub, port, structuredClone(await readState(port.directory)), { ...options, reconcileOnly: true });
+      if (outcome.status === 'queued') entry = { port: name, runner: port.target.runner, work: true };
+    } catch { /* The reconcile-only run records the error. */ }
+    planned.push(entry);
+  }
+  return planned;
 }
 
 const cell = (text: string): string => text.replace(/\|/g, '\\|').replace(/\s+/g, ' ').trim() || '—';

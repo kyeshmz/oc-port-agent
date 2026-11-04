@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { checkHub, initPort, runHub, type HubGitHub, type PortState } from '../src/hub.js';
+import { checkHub, initPort, planHub, runHub, type HubGitHub, type PortState } from '../src/hub.js';
 import { jsonWrite } from '../src/upstream.js';
 import { main } from '../src/cli.js';
 import { git } from '../src/process.js';
@@ -217,6 +217,25 @@ test('a target with two upstreams gets one PR with a commit per upstream', async
   await runHub(f.hub, { github: f.github, invoke: mustNotInvoke });
   const recorded = await state(f.hub);
   assert.deepEqual([recorded.upstreams.client!.release, recorded.upstreams.format!.release], ['v1.1.0', 'v3.0.0']);
+});
+test('hub plan sends only ports with work to their own runner, and setup runs only for real work', async t => {
+  const f = await hubFixture(t);
+  const marker = join(f.directory, 'setup-ran');
+  const targetFile = join(f.hub, 'ports', 'demo', 'target.json');
+  const target = JSON.parse(await readFile(targetFile, 'utf8'));
+  await jsonWrite(targetFile, { ...target, runner: 'macos-15', setup: [{ command: process.execPath, args: ['-e', 'require("fs").writeFileSync(process.argv[1], "")', marker] }] });
+  assert.deepEqual(await planHub(f.hub, { github: f.github }), [{ port: 'demo', runner: 'ubuntu-latest', work: false }]);
+  await changeUpstream(f.upstream, 2);
+  await tag(f.upstream, 'v1.1.0');
+  assert.deepEqual(await planHub(f.hub, { github: f.github }), [{ port: 'demo', runner: 'macos-15', work: true }]);
+  assert.equal(await readFile(join(f.hub, 'ports', 'demo', 'state.json'), 'utf8').catch(() => 'absent'), 'absent', 'planning writes nothing');
+  const [queued] = await runHub(f.hub, { reconcileOnly: true, github: f.github, invoke: mustNotInvoke });
+  assert.deepEqual([queued!.status, queued!.message], ['queued', 'New upstream changes; they are ported on macos-15.']);
+  await assert.rejects(readFile(marker), /ENOENT/);
+  assert.equal((await runHub(f.hub, { github: f.github, invoke: port(2) }))[0]!.status, 'proposal');
+  await readFile(marker);
+  await jsonWrite(targetFile, { ...target, runner: 'macOS 15' });
+  assert.match((await runHub(f.hub, { github: f.github, invoke: mustNotInvoke }))[0]!.message!, /runner must be a GitHub Actions runner label/);
 });
 test('hub check previews without GitHub or a model', async t => {
   const f = await hubFixture(t);
