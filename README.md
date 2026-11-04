@@ -32,8 +32,10 @@ architectures, or a curated set of features from several upstream repositories.
 
 ## How it works
 
-1. **Discover:** Find upstream activity and compare the configured branch against
-   the saved checkpoint. `--full` also adopts functionality already present upstream.
+1. **Discover:** Find the newest upstream release (or the configured branch when
+   the upstream has no releases) and compare it against the saved checkpoint.
+   Commits after the latest release wait for the next one. `--full` also adopts
+   functionality already present upstream.
 2. **Select:** Filter the diff by watched paths, then use acceptance criteria to
    guide the adaptation.
 3. **Adapt:** Give a restricted OpenCode agent pinned source context and a separate
@@ -51,7 +53,8 @@ whether a proposed adaptation is ready to merge.
 | Mode | Best for | Update discovery |
 | --- | --- | --- |
 | **CLI** | First adoption and local, reviewable syncs | Fetches when you run `check` or `sync` |
-| **[GitHub Action](docs/github-actions.md)** | Running the CLI in target CI | Manual runs, optional dispatch, daily fallback |
+| **[GitHub Action](docs/github-actions.md)** | Running the CLI in target CI | Daily schedule, manual runs |
+| **[Hub repository](#hub-repository)** | Many targets from one repository, with keys in one place and no setup in targets | Daily schedule; each new release opens one PR per target |
 | **[Hosted GitHub App](#hosted-github-app)** | Shared credentials and central monitoring across targets | Public commit/tag feeds, optional push webhooks, daily fallback |
 
 **Status:** Early release. The CLI has completed real OpenCode-backed adoption
@@ -81,6 +84,15 @@ Switch to your **target** Git repository, then scaffold its policy:
 cd /path/to/your-target
 oc-port-agent init --upstream https://github.com/your-org/reference-project.git --ref main
 ```
+
+By default it follows the newest stable upstream release, and falls back to the
+`--ref` branch when there are none. To choose something else:
+
+| You want | `upstream` in the policy | `init` flags |
+| --- | --- | --- |
+| Only one major version | `"tags": "v2.*"` | `--tags 'v2.*'` |
+| One package in a monorepo | `"tags": "@scope/pkg@*"` | `--tags '@scope/pkg@*'` |
+| Every commit on a branch | `"ref": "release/1.x", "track": "branch"` | `--ref release/1.x --track branch` |
 
 Edit `oc-port-agent.json`. Replace the generated placeholders with actual paths,
 observable acceptance criteria, intentional differences, and verification commands.
@@ -162,7 +174,28 @@ oc-port-agent sync
 
 For several upstreams in one target and one proposal, use a
 [policy collection](docs/multiple-repositories.md). For recurring runs, choose
-the GitHub Action or hosted App below; the CLI does not schedule itself.
+the GitHub Action, the hub repository, or the hosted App below; the CLI does not schedule itself.
+
+## Hub repository
+
+One repository manages every target: no policy, checkpoint, secrets, or workflow
+in the targets themselves. It keeps a folder per target:
+
+- `target.json`: the repository, base branch, and verification commands.
+- `upstreams/<id>.json`: what to follow, the selections the target uses,
+  `preserve` rules for how it differs, and a `start` point.
+- `notes.md`: free-form context that goes to the agent with every change.
+
+A daily GitHub Actions workflow runs `oc-port-agent hub run`, which for every folder:
+
+- records the previous PR as synced (merged) or skipped (closed);
+- ports new upstream releases into a fresh clone of the target, runs its
+  verification, and opens one draft PR with a commit per upstream;
+- writes `ports/<name>/state.json` and `STATUS.md` back to the hub.
+
+The hub holds a GitHub App key and the model key. `hub check` previews every
+port without GitHub calls or a model; `hub init` scaffolds a new folder. See the
+[hub commands](docs/cli-reference.md#hub-commands).
 
 ## Hosted GitHub App
 

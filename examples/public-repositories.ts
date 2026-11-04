@@ -342,7 +342,8 @@ async function findLicense(snapshot: string, commit: string): Promise<string> {
 function configuration(item: PublicCase, snapshot: string, model: string): Record<string, unknown> {
   return {
     version: 1,
-    upstream: { repository: snapshot, ref: PINNED_REF },
+    // These cases pin an exact commit, so release tags must not move the target.
+    upstream: { repository: snapshot, ref: PINNED_REF, track: 'branch' },
     selections: [{
       id: item.id,
       description: item.description,

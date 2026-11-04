@@ -69,17 +69,16 @@ Do not run this workflow on untrusted forks or with `pull_request_target`.
 
 The example target workflow supports:
 
+- A daily schedule at 08:17 UTC. Change its `cron` line to pick another time;
+  the format is `'minute hour * * *'`, always UTC. GitHub doesn't send webhooks
+  for repositories you don't own, so a schedule is how a new upstream release is
+  noticed. A run without a new release exits without calling a model.
 - Manual dispatch to preview, sync, or perform first adoption.
-- An `upstream-push` repository dispatch for prompt updates when you control the
-  upstream. The [optional notify workflow](../examples/upstream-notify-workflow.yml)
-  sends it on pushes to `main`; its dispatch token needs Contents write on the
-  target.
-- A daily scheduled fallback, which also covers third-party upstreams without
-  any upstream setup.
 
-Dispatch is a wake-up hint. The sync reads the repository and branch from the
-committed policy, never `github.event.client_payload`. The CLI does not schedule
-itself or merge proposals automatically.
+The sync reads the repository and what to follow from the committed policy. The
+CLI does not schedule itself or merge proposals automatically. GitHub disables
+scheduled workflows in public repositories after 60 days without activity;
+re-enable it in the Actions tab if that happens.
 
 The official Action invokes `opencode github run`; this wrapper uses its own
 sync/checkpoint/verification pipeline with OpenCode as the restricted coding

@@ -24,6 +24,7 @@ export interface SourceSyncResult {
   upstream: Config['upstream'];
   from: string;
   to: string;
+  release?: string;
   status: 'up-to-date' | 'proposal';
   report?: string;
 }
@@ -116,12 +117,15 @@ async function verify(root: string, config: Config): Promise<{ results: Verifica
 export function prBody(plan: Plan, report: AgentReport, paths: string[], verification: VerificationResult[], reportPath: string): string {
   // Untrusted text is kept in fenced JSON, not interpreted as workflow instructions.
   const details = JSON.stringify({ summary: report.summary, decisions: report.decisions }, null, 2).replace(/`/g, '\\u0060');
-  return `## Summary\n\nAdapt selected upstream functionality (${plan.mode}) from \`${plan.from}\` to \`${plan.to}\`.\n\n${paths.length ? `${paths.length} target files changed.` : 'No target implementation changes; checkpoint/report only.'}\n\n## Decisions\n\n\`\`\`json\n${details}\n\`\`\`\n\n## Verification\n\n${verification.map(v => `- ${JSON.stringify([v.command, ...v.args]).replace(/`/g, '\\u0060')} — exit ${v.code}`).join('\n')}\n\nEvidence: \`${reportPath}\`. This draft requires human review; the checkpoint takes effect only when these changes merge.\n`;
+  return `## Summary\n\nAdapt selected upstream functionality (${plan.mode}) from \`${plan.from}\` to \`${plan.to}\`${plan.release ? ` (release \`${plan.release}\`)` : ''}.\n\n${paths.length ? `${paths.length} target files changed.` : 'No target implementation changes; checkpoint/report only.'}\n\n## Decisions\n\n\`\`\`json\n${details}\n\`\`\`\n\n## Verification\n\n${verification.map(v => `- ${JSON.stringify([v.command, ...v.args]).replace(/`/g, '\\u0060')} — exit ${v.code}`).join('\n')}\n\nEvidence: \`${reportPath}\`. This draft requires human review; the checkpoint takes effect only when these changes merge.\n`;
 }
 
 type Source = Awaited<ReturnType<typeof planSync>>;
+const proposalTitle = (plan: Plan): string => `${plan.mode === 'adopt' ? 'Adopt' : 'Sync'} upstream ${plan.release ? `release ${plan.release}` : `functionality ${plan.to.slice(0, 12)}`}`;
 
-async function applySource(worktree: string, { config, state, plan }: Source, invoke: SyncOptions['invoke']): Promise<{ reportPath: string; body: string }> {
+export interface Adaptation { targetHead: string; report: AgentReport; verification: VerificationResult[]; paths: string[] }
+// Runs the agent and every host gate in place. Leaves the verified changes uncommitted.
+export async function adaptSource(worktree: string, config: Config, plan: Plan, invoke: SyncOptions['invoke']): Promise<Adaptation> {
   const targetHead = (await git(worktree, ['rev-parse', 'HEAD'])).trim();
   await skillGate(worktree, config);
   const packet = await writePacket(worktree, config, plan);
@@ -156,11 +160,16 @@ async function applySource(worktree: string, { config, state, plan }: Source, in
     if (!plan.selections.length) break;
   }
   if (!passed) throw new Error(`Verification failed; checkpoint not advanced. ${failure ?? ''}`);
+  return { targetHead, report, verification, paths };
+}
+
+async function applySource(worktree: string, { config, state, plan }: Source, invoke: SyncOptions['invoke']): Promise<{ reportPath: string; body: string }> {
+  const { targetHead, report, verification, paths } = await adaptSource(worktree, config, plan, invoke);
   const reportPath = `.oc-port/reports/${policyHash(config).slice(0, 12)}-${plan.mode}-${plan.to}.json`;
   await mkdir(join(worktree, '.oc-port', 'reports'), { recursive: true });
   await jsonWrite(join(worktree, reportPath), {
     version: 1, upstream: config.upstream, configurationPath: config.configurationPath, mode: plan.mode,
-    from: plan.from, to: plan.to, targetBase: targetHead,
+    from: plan.from, to: plan.to, ...(plan.release ? { release: plan.release } : {}), targetBase: targetHead,
     commits: plan.commits, changedUpstreamPaths: plan.changedPaths, changedTargetPaths: paths,
     report, verification,
     note: 'Agent decisions are claims for human review, not proof of behavioral equivalence. Checkpoint activates when this commit merges.',
@@ -170,7 +179,7 @@ async function applySource(worktree: string, { config, state, plan }: Source, in
   await mkdir(dirname(join(worktree, checkpoint)), { recursive: true });
   await jsonWrite(join(worktree, checkpoint), { ...state, lastSyncedCommit: plan.to });
   await git(worktree, ['add', '--', ...paths, checkpoint, reportPath]);
-  const title = `${plan.mode === 'adopt' ? 'Adopt' : 'Sync'} upstream functionality ${plan.to.slice(0, 12)}`;
+  const title = proposalTitle(plan);
   await git(worktree, ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false', '-c', 'user.name=oc-port-agent', '-c', 'user.email=oc-port-agent@users.noreply.github.com', 'commit', '-m', title]);
   return { reportPath, body: prBody(plan, report, paths, verification, reportPath) };
 }
@@ -188,7 +197,7 @@ export async function synchronize(root: string, options: SyncOptions = {}): Prom
   const pending = sources.filter(({ plan }) => options.full || plan.from !== plan.to);
   const results: SourceSyncResult[] = sources.map(({ config, plan }) => ({
     config: config.configurationPath ?? CONFIG, upstream: config.upstream,
-    from: plan.from, to: plan.to, status: 'up-to-date',
+    from: plan.from, to: plan.to, ...(plan.release ? { release: plan.release } : {}), status: 'up-to-date',
   }));
   if (!pending.length) return { status: 'up-to-date', ...(options.collection !== undefined ? { sources: results } : {}) };
   for (const { config } of pending) {
@@ -218,7 +227,7 @@ export async function synchronize(root: string, options: SyncOptions = {}): Prom
     }
     const title = options.collection !== undefined
       ? `${first.plan.mode === 'adopt' ? 'Adopt' : 'Sync'} functionality from ${pending.length} upstream policies`
-      : `${first.plan.mode === 'adopt' ? 'Adopt' : 'Sync'} upstream functionality ${first.plan.to.slice(0, 12)}`;
+      : proposalTitle(first.plan);
     if (options.collection !== undefined) {
       const combinedHead = (await git(worktree, ['rev-parse', 'HEAD'])).trim();
       const verification: { config: string; results: VerificationResult[] }[] = [];

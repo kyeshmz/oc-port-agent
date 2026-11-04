@@ -20,7 +20,7 @@ export function configInput(repository = '/upstream'): Record<string, unknown> {
 export const config = (): Config => parseConfig(configInput());
 export const plan = (): Plan => ({ mode: 'sync', from: 'a'.repeat(40), to: 'b'.repeat(40), commits: [], changedPaths: ['src/client.rs'], selections: config().selections, diff: '', before: [], after: [] });
 
-async function initRepo(path: string): Promise<void> {
+export async function initRepo(path: string): Promise<void> {
   await mkdir(path, { recursive: true });
   await git(path, ['init', '-b', 'main']);
   await git(path, ['config', 'user.name', 'Test']);

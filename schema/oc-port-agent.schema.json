@@ -14,7 +14,12 @@
     "reviewMetadataPaths": { "$ref": "#/$defs/strings", "description": "Exact, already selected provenance/registry files that may record skipped reviews. No globs or scope expansion; applied decisions still need nonmetadata target changes." },
     "upstream": {
       "type": "object", "additionalProperties": false, "required": ["repository", "ref"],
-      "properties": { "repository": { "type": "string", "minLength": 1 }, "ref": { "type": "string", "minLength": 1 } }
+      "properties": {
+        "repository": { "type": "string", "minLength": 1 },
+        "ref": { "type": "string", "minLength": 1, "description": "Branch to follow when the upstream has no stable release tags, or when track is \"branch\"." },
+        "track": { "enum": ["releases", "branch"], "default": "releases", "description": "releases: follow the newest stable version tag (v1.2.3; prereleases ignored), falling back to the branch when there is none. branch: follow every branch commit." },
+        "tags": { "type": "string", "pattern": "^[A-Za-z0-9._@/*?+-]+$", "description": "Only with track \"releases\": which release tags count, using * and ? wildcards, e.g. \"v2.*\" for one major version or \"@scope/pkg@*\" for one package in a monorepo. Matching nothing is an error, not a fallback to the branch." }
+      }
     },
     "selections": {
       "type": "array", "minItems": 1,
