@@ -28,9 +28,13 @@ export interface Verification {
   args: string[];
   timeoutSeconds: number;
 }
+// releases: follow the newest stable version tag (v1.2.3), falling back to the branch when there is none.
+export type UpstreamTracking = 'releases' | 'branch';
+export interface UpstreamSource { repository: string; ref: string }
 export interface Config {
   version: 1;
-  upstream: { repository: string; ref: string };
+  // tags: which release tags count, e.g. "v2.*" or "@scope/pkg@*". Only with track "releases".
+  upstream: UpstreamSource & { track: UpstreamTracking; tags?: string };
   selections: Selection[];
   preserve: string[];
   protectedPaths: string[];
@@ -43,10 +47,12 @@ export interface Config {
   baselineCommit?: string;
   configurationPath?: string;
   protectedConfigPaths?: string[];
+  // Operator-written context for the agent (the hub's notes.md and sync history). Not part of the policy hash.
+  notes?: string;
 }
 export interface State {
   version: 1;
-  upstream: Config['upstream'];
+  upstream: UpstreamSource;
   policyHash: string;
   lastSyncedCommit: string;
 }
@@ -139,7 +145,7 @@ export function parseConfig(input: unknown): Config {
   if (root.$schema !== undefined) string(root.$schema, '$schema');
   if (root.version !== 1) throw new Error('config.version must be 1');
   const upstream = object(root.upstream, 'upstream');
-  keys(upstream, ['repository', 'ref'], 'upstream');
+  keys(upstream, ['repository', 'ref', 'track', 'tags'], 'upstream');
   const repository = string(upstream.repository, 'upstream.repository');
   if (!repository.startsWith('https://') && !repository.startsWith('/')) throw new Error('upstream.repository must be an HTTPS URL or absolute local repository path');
   if (repository.startsWith('https://')) {
@@ -148,6 +154,13 @@ export function parseConfig(input: unknown): Config {
   }
   const ref = string(upstream.ref, 'upstream.ref');
   if (ref.startsWith('-') || ref.startsWith('/') || ref.endsWith('/') || ref.endsWith('.') || /[ ~^:?*\[\\]/.test(ref) || ref.includes('..') || ref.includes('@{') || ref.includes('//')) throw new Error('upstream.ref must be a branch name, not a revision expression');
+  const track = upstream.track ?? 'releases';
+  if (track !== 'releases' && track !== 'branch') throw new Error('upstream.track must be "releases" or "branch"');
+  const tags = upstream.tags === undefined ? undefined : string(upstream.tags, 'upstream.tags');
+  if (tags !== undefined) {
+    if (track !== 'releases') throw new Error('upstream.tags only applies when upstream.track is "releases"');
+    if (!/^[A-Za-z0-9._@/*?+-]+$/.test(tags) || tags.includes('..') || tags.startsWith('/') || tags.endsWith('/')) throw new Error('upstream.tags must be a tag name pattern using only * and ? wildcards, e.g. "v2.*" or "@scope/pkg@*"');
+  }
   if (!Array.isArray(root.selections) || !root.selections.length) throw new Error('Configure at least one selection');
   const ids = new Set<string>();
   const selections = root.selections.map((raw, i): Selection => {
@@ -200,7 +213,7 @@ export function parseConfig(input: unknown): Config {
     if (/[?*]/.test(path) || !selections.some(selection => matchesAny(path, selection.targetPaths))) throw new Error('reviewMetadataPaths must be exact files already inside the declared target scope');
   }
   return {
-    version: 1, upstream: { repository, ref }, selections,
+    version: 1, upstream: { repository, ref, track, ...(tags !== undefined ? { tags } : {}) }, selections,
     preserve: strings(root.preserve ?? [], 'preserve'),
     protectedPaths: patterns(root.protectedPaths ?? DEFAULT_PROTECTED, 'protectedPaths'), verification,
     opencode: {
@@ -241,8 +254,10 @@ export async function loadConfig(root: string, file = CONFIG): Promise<Config> {
   if (!location || location === '..' || location.startsWith('..' + sep) || isAbsolute(location)) throw new Error('--config escapes the target repository');
   return { ...parseConfig(JSON.parse(await readFile(path, 'utf8'))), configurationPath: file };
 }
+// Changing track or tags keeps existing checkpoints valid, so they are not hashed. Changing ref still is.
+export const upstreamSource = (config: Config): UpstreamSource => ({ repository: config.upstream.repository, ref: config.upstream.ref });
 export function policyHash(config: Config): string {
-  return createHash('sha256').update(JSON.stringify({ upstream: config.upstream, selections: config.selections, preserve: config.preserve, protectedPaths: config.protectedPaths, verification: config.verification, ...(config.allowSkillEdits.length ? { allowSkillEdits: config.allowSkillEdits } : {}), ...(config.allowNulTextPaths.length ? { allowNulTextPaths: config.allowNulTextPaths } : {}), ...(config.reviewMetadataPaths.length ? { reviewMetadataPaths: config.reviewMetadataPaths } : {}), ...(config.configurationPath && config.configurationPath !== CONFIG ? { configurationPath: config.configurationPath } : {}) })).digest('hex');
+  return createHash('sha256').update(JSON.stringify({ upstream: upstreamSource(config), selections: config.selections, preserve: config.preserve, protectedPaths: config.protectedPaths, verification: config.verification, ...(config.allowSkillEdits.length ? { allowSkillEdits: config.allowSkillEdits } : {}), ...(config.allowNulTextPaths.length ? { allowNulTextPaths: config.allowNulTextPaths } : {}), ...(config.reviewMetadataPaths.length ? { reviewMetadataPaths: config.reviewMetadataPaths } : {}), ...(config.configurationPath && config.configurationPath !== CONFIG ? { configurationPath: config.configurationPath } : {}) })).digest('hex');
 }
 export function parseState(raw: unknown, config: Config): State {
   const s = object(raw, 'state');

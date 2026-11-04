@@ -19,6 +19,38 @@ below inside the **target** Git repository.
 `check` and `sync` accept `--collection <ports.json>` instead of `--config`.
 `sync --model provider/model#variant` overrides the model for one run without
 rewriting the policy. See [multiple upstreams](multiple-repositories.md).
+`init` also accepts `--track releases|branch` and `--tags <pattern>` to choose
+what to follow.
+
+## Hub commands
+
+Run these in a hub repository (or pass `--hub <dir>`). Each folder
+`ports/<name>/` holds `target.json`, `upstreams/<id>.json` and `notes.md`.
+
+| Command | Result |
+| --- | --- |
+| `hub init <name> --target owner/repo --upstream <url>` | Scaffold a port folder. Also accepts `--ref`, `--base`, `--track`, `--tags`. |
+| `hub check [--port <name>]` | Preview every port without GitHub calls, a model, or state changes. |
+| `hub run [--port <name>] [--model provider/model#variant]` | Reconcile earlier PRs, port new upstream changes, and open one draft PR per target. Writes `ports/*/state.json` and `STATUS.md`. Needs `GH_TOKEN` with contents and pull request write access to the targets. |
+| `hub run --reconcile-only` | Record PR outcomes and checkpoints, but leave porting to a run on the port's own runner. |
+| `hub plan` | Print, on one line of JSON, which ports have work today and the runner each needs. Writes nothing. |
+| `hub status` | Rewrite `STATUS.md` from every `ports/*/state.json`. |
+
+`target.json` may set `runner` (a GitHub Actions runner label, default
+`ubuntu-latest`) and `setup`, a list of `{ command, args, timeoutSeconds? }`
+toolchain commands such as `brew install ffmpeg`. Setup runs on that runner
+before the agent, outside the target clone, and only when there is something to port.
+
+An upstream file holds the policy fields `upstream`, `selections`, `preserve`,
+and optionally `limits`, `allowSkillEdits`, `allowNulTextPaths`, and
+`reviewMetadataPaths`. Verification, `protectedPaths`, and `opencode` come
+from `target.json`. `start` sets the first checkpoint: a full commit SHA the
+target already matches, `"latest"`, or `"adopt"` (port everything selected).
+After that, `state.json` wins. Changing `selections` makes the next PR re-adopt
+everything selected.
+
+A failing port is retried on the next run. After two failures that reached the
+model, it waits for a new upstream release or an edit to its folder.
 
 ## Configure a target
 
@@ -50,7 +82,9 @@ the declared paths. See the [structured-instructions guide](porting-instructions
 | `version` | Must be `1`. |
 | `$schema` | Optional editor reference to `./node_modules/oc-port-agent/schema/oc-port-agent.schema.json` when installed as a package. Runtime validation is still enforced. |
 | `upstream.repository` | HTTPS Git URL without embedded credentials, or an absolute local repository path. |
-| `upstream.ref` | Branch name; the scaffold defaults to `main`. Not a tag or arbitrary revision expression. |
+| `upstream.ref` | Branch name; the scaffold defaults to `main`. Not a tag or arbitrary revision expression. Followed when the upstream has no release tags, or when `track` is `branch`. |
+| `upstream.track` | `releases` (default) follows the newest stable version tag such as `v1.2.3` or `1.2.3`; prereleases like `v2.0.0-rc.1` are ignored, and the branch is followed when there are no such tags. `branch` follows every branch commit. Changing this does not reset the checkpoint. |
+| `upstream.tags` | Optional, `releases` only. Which release tags count, with `*` and `?` wildcards: `v2.*` stays on one major version, `@scope/pkg@*` follows one package of a monorepo. If nothing matches, the run stops with an error instead of following the branch. Changing this does not reset the checkpoint. |
 | `selections` | One or more rules: unique `id`, `description`, `upstreamPaths`, `targetPaths`, and nonempty `acceptance`. Optional `excludeUpstreamPaths`, `mappings`, and detailed `instructions`. |
 | `preserve` | Intentional target differences and compatibility requirements. Use tests to enforce critical ones. |
 | `protectedPaths` | Additional edit-denied paths. Defaults protect CI workflows and agent instruction files. Explicitly replace this array to opt into adapting those files. Tool internals, the active policy, checkpoints, agents, and OpenCode configuration remain protected regardless. |
